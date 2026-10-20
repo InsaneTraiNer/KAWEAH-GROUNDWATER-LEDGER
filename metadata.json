@@ -1,0 +1,6 @@
+{
+  "name": "SGMA Extraction Auditor & Water Ledger Engine",
+  "description": "Production deterministic groundwater extraction auditor and hydraulic ledger engine for California SGMA subbasins (Kaweah, Tule, Kings), disproving satellite ET over-pumping penalties via CPUC-regulated PG&E 15-minute interval telemetry, DWR CASGEM soundings, and certified pump curves.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

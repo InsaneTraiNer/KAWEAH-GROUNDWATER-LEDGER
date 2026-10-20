@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom" xmlns:espi="http://naesb.org/espi">
+  <title>PG&amp;E Share My Data ESPI Feed — SAID 9482710455 (Meter 1008492031)</title>
+  <entry>
+    <title>ReadingType Wh (Multiplier 0)</title>
+    <content>
+      <espi:ReadingType>
+        <espi:AccumulationBehaviour>4</espi:AccumulationBehaviour>
+        <espi:commodity>1</espi:commodity>
+        <espi:powerOfTenMultiplier>0</espi:powerOfTenMultiplier>
+        <espi:uom>72</espi:uom>
+      </espi:ReadingType>
+    </content>
+  </entry>
+  <entry>
+    <title>IntervalBlock April-October 2026</title>
+    <content>
+      <espi:IntervalBlock>
+        <espi:IntervalReading>
+          <espi:timePeriod>
+            <espi:duration>900</espi:duration>
+            <espi:start>1776171600</espi:start>
+          </espi:timePeriod>
+          <espi:value>22150</espi:value>
+        </espi:IntervalReading>
+        <espi:IntervalReading>
+          <espi:timePeriod>
+            <espi:duration>900</espi:duration>
+            <espi:start>1776172500</espi:start>
+          </espi:timePeriod>
+          <espi:value>22240</espi:value>
+        </espi:IntervalReading>
+        <espi:IntervalReading>
+          <espi:timePeriod>
+            <espi:duration>900</espi:duration>
+            <espi:start>1776173400</espi:start>
+          </espi:timePeriod>
+          <espi:value>5400</espi:value>
+        </espi:IntervalReading>
+        <espi:IntervalReading>
+          <espi:timePeriod>
+            <espi:duration>900</espi:duration>
+            <espi:start>1776174300</espi:start>
+          </espi:timePeriod>
+          <espi:value>31400</espi:value>
+        </espi:IntervalReading>
+      </espi:IntervalBlock>
+    </content>
+  </entry>
+</feed>
