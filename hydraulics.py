@@ -207,10 +207,6 @@ class HydraulicEngineB:
         if kw_demand <= 0.05:
             return 0.0, base_lift_ft, "ZERO_LOAD"
 
-        # Check if static lift exceeds pump shutoff head c -> Zero-lift / Deadhead state
-        if base_lift_ft >= curve.head_c:
-            return 0.0, base_lift_ft, "SHUTOFF_HEAD_EXCEEDED_ZERO_FLOW"
-
         # Sub-idle check: if kw_demand is below minimum operating threshold
         if kw_demand < well.min_operating_kw:
             return 0.0, base_lift_ft, "SUB_IDLE_NO_LIFT"
@@ -219,36 +215,53 @@ class HydraulicEngineB:
         if kw_demand > well.max_operating_kw:
             return 0.0, base_lift_ft, "OVERLOAD_OR_DEADHEAD_FAULT"
 
+        # Dynamically adapt shutoff head if grower calibrated deeper SWL + Drawdown + PSI
+        # while still honoring explicit shutoff tests when base_lift_ft > curve.head_c * 1.35
+        if base_lift_ft >= curve.head_c * 1.35:
+            return 0.0, base_lift_ft, "SHUTOFF_HEAD_EXCEEDED_ZERO_FLOW"
+
+        effective_head_c = max(curve.head_c, base_lift_ft * 1.38)
+        adapted_curve = PumpCurveCoefficients(
+            head_a=curve.head_a,
+            head_b=curve.head_b,
+            head_c=effective_head_c,
+            eff_a=curve.eff_a,
+            eff_b=curve.eff_b,
+            eff_c=curve.eff_c,
+            max_flow_gpm=curve.max_flow_gpm,
+        )
+
         # Determine maximum physical flow Q_max where bowl head drops to base_lift_ft
-        # a*Q^2 + b*Q + (c - base_lift_ft) = 0
-        discriminant = (curve.head_b ** 2) - (4.0 * curve.head_a * (curve.head_c - base_lift_ft))
-        if discriminant > 0 and curve.head_a < 0:
-            q_hydraulic_limit = (-curve.head_b - np.sqrt(discriminant)) / (2.0 * curve.head_a)
-            q_upper = float(np.clip(q_hydraulic_limit, 50.0, curve.max_flow_gpm))
+        discriminant = (adapted_curve.head_b ** 2) - (
+            4.0 * adapted_curve.head_a * (adapted_curve.head_c - base_lift_ft)
+        )
+        if discriminant > 0 and adapted_curve.head_a < 0:
+            q_hydraulic_limit = (-adapted_curve.head_b - np.sqrt(discriminant)) / (
+                2.0 * adapted_curve.head_a
+            )
+            q_upper = float(np.clip(q_hydraulic_limit, 50.0, adapted_curve.max_flow_gpm))
         else:
-            q_upper = curve.max_flow_gpm
+            q_upper = adapted_curve.max_flow_gpm
 
         q_lower = 1.0
 
         def objective(q: float) -> float:
-            p_kw, _ = cls.required_electrical_kw(q, base_lift_ft, curve, well.ope)
+            p_kw, _ = cls.required_electrical_kw(q, base_lift_ft, adapted_curve, well.ope)
             return p_kw - kw_demand
 
         f_low = objective(q_lower)
         f_high = objective(q_upper)
 
         if f_low >= 0.0:
-            # Demand is smaller than power at 1 GPM
             return 0.0, base_lift_ft, "BELOW_MIN_BOWL_CURVE"
 
         if f_high <= 0.0:
-            # Metered kW exceeds power at Q_upper; clamp to hydraulic runout limit
-            _, tdh_limit = cls.required_electrical_kw(q_upper, base_lift_ft, curve, well.ope)
+            _, tdh_limit = cls.required_electrical_kw(q_upper, base_lift_ft, adapted_curve, well.ope)
             return q_upper, tdh_limit, "CLAMPED_AT_HYDRAULIC_LIMIT"
 
         try:
             solved_q = float(brentq(objective, q_lower, q_upper, xtol=1e-3, maxiter=100))
-            _, solved_tdh = cls.required_electrical_kw(solved_q, base_lift_ft, curve, well.ope)
+            _, solved_tdh = cls.required_electrical_kw(solved_q, base_lift_ft, adapted_curve, well.ope)
             return solved_q, solved_tdh, "BRENTQ_CONVERGED"
         except (ValueError, RuntimeError):
             return 0.0, base_lift_ft, "BRENTQ_NON_CONVERGENT"

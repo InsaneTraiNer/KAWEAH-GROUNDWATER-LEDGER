@@ -8,21 +8,21 @@
   "audit_period_end": "2026-10-17T13:00:00-07:00",
   "engine_mode": "ENGINE_A_ALGEBRAIC",
   "total_kwh_consumed": 44096.83,
-  "total_af_pumped": 100.165,
+  "total_af_pumped": 100.2486,
   "uncertainty_bracket_total": {
-    "af_min": 87.0286,
-    "af_expected": 100.165,
-    "af_max": 111.6593
+    "af_min": 87.1013,
+    "af_expected": 100.2486,
+    "af_max": 111.7526
   },
-  "phantom_af_prevented": 0.6043,
+  "phantom_af_prevented": 0.5207,
   "broken_suction_intervals": 8,
   "deadhead_overload_intervals": 5,
-  "intermittent_cycling_intervals": 4,
+  "intermittent_cycling_intervals": 2,
   "land_iq_billed_af": 145.2,
-  "net_discrepancy_af": 45.035,
-  "discrepancy_pct": 44.96,
+  "net_discrepancy_af": 44.9514,
+  "discrepancy_pct": 44.84,
   "gsa_penalty_rate_per_af": 185.0,
-  "dollar_variance": 8331.47,
+  "dollar_variance": 8316.01,
   "evidentiary_confidence_tier": "CERTIFIED_APET",
   "dwr_monitoring_site_used": "362077N1193473W001",
   "monthly_breakdown": [
@@ -68,15 +68,15 @@
     {
       "year_month": "2026-07",
       "total_intervals": 480,
-      "active_pumping_hours": 118.25,
-      "anomalous_intervals_excluded": 4,
-      "phantom_af_excluded": 0.1483,
+      "active_pumping_hours": 118.75,
+      "anomalous_intervals_excluded": 2,
+      "phantom_af_excluded": 0.0646,
       "total_kwh": 10859.87,
       "mean_tdh_ft": 261.89,
-      "mean_flow_gpm": 1127.7,
-      "verified_af": 24.5549,
-      "tier2_regional_af": 21.3346,
-      "tier1_mfg_ceiling_af": 27.3727
+      "mean_flow_gpm": 1126.8,
+      "verified_af": 24.6386,
+      "tier2_regional_af": 21.4073,
+      "tier1_mfg_ceiling_af": 27.466
     },
     {
       "year_month": "2026-08",

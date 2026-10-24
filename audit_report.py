@@ -78,6 +78,10 @@ class AuditReportGenerator:
             active_normal = [
                 r for r in m_recs if r.status == IntervalStatus.NORMAL and r.calculated_af > 0
             ]
+            active_hours = sum(
+                max(0.0, (r.interval_end - r.interval_start).total_seconds() / 3600.0) or 0.25
+                for r in active_normal
+            )
             anomalous = [r for r in m_recs if r.status != IntervalStatus.NORMAL]
             phantom_af = sum(r.raw_unfiltered_af for r in anomalous)
 
@@ -94,7 +98,7 @@ class AuditReportGenerator:
                 MonthlyExtractionSummary(
                     year_month=ym,
                     total_intervals=len(m_recs),
-                    active_pumping_hours=round(len(active_normal) * 0.25, 2),
+                    active_pumping_hours=round(active_hours, 2),
                     anomalous_intervals_excluded=len(anomalous),
                     phantom_af_excluded=round(phantom_af, 4),
                     total_kwh=round(m_kwh, 2),
@@ -118,7 +122,7 @@ class AuditReportGenerator:
             if total_af_rounded > 0
             else 0.0
         )
-        dollar_variance = round(net_discrepancy_af * gsa_penalty_rate_per_af, 2)
+        dollar_variance = round(max(0.0, net_discrepancy_af) * gsa_penalty_rate_per_af, 2)
 
         bracket_total = UncertaintyBracket(
             af_min=round(min(total_af_min, total_af_rounded), 4),
@@ -196,7 +200,7 @@ class AuditReportGenerator:
 | **1. GSA Land IQ Remote-Sensing ET Assessment** | **{summary.land_iq_billed_af:,.2f} AF** | Proprietary satellite canopy energy-balance model (SEBAL/METRIC) |
 | **2. Audited PG&E Physical Hydraulic Extraction** | **{summary.total_af_pumped:,.2f} AF** | CPUC-regulated 15-min revenue meter ({summary.total_kwh_consumed:,.1f} kWh) + DWR SWL |
 | **3. Physical Uncertainty Bracket (Tier 2 – Tier 1)** | **[{summary.uncertainty_bracket_total.af_min:,.2f} – {summary.uncertainty_bracket_total.af_max:,.2f} AF]** | Bounded between Regional OPE (0.53) and New Bowl Ceiling OPE (0.68) |
-| **4. Net Satellite Over-Estimation Discrepancy** | **+{summary.net_discrepancy_af:,.2f} AF ({summary.discrepancy_pct:+.1f}%)** | Unpumped volume erroneously attributed to groundwater extraction |
+| **4. Net Satellite Over-Estimation Discrepancy** | **{summary.net_discrepancy_af:+,.2f} AF ({summary.discrepancy_pct:+.1f}%)** | Unpumped volume erroneously attributed to groundwater extraction |
 | **5. Contested GSA Over-Pumping Penalty Variance** | **${summary.dollar_variance:,.2f}** | Evaluated at GSA Tier Penalty Rate of ${summary.gsa_penalty_rate_per_af:,.2f}/AF |
 | **6. Phantom Water Excluded via Forensic Filter** | **{summary.phantom_af_prevented:,.3f} AF** | {summary.broken_suction_intervals} suction-loss, {summary.deadhead_overload_intervals} deadhead, {summary.intermittent_cycling_intervals} cycling intervals |
 

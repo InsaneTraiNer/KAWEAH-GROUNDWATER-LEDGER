@@ -4,7 +4,9 @@ import {
   brentqSolver,
   computeTDH,
   EfficiencySource,
+  inferPlausibleKwBounds,
   IntervalStatus,
+  parsePGEDataFile,
   parsePGEGreenButtonCSV,
   runCompleteSGMAAudit,
   solveEngineBInterval,
@@ -68,7 +70,7 @@ const SAMPLE_DWR: DWRMonitoringRecord[] = [
     ground_surface_elevation_ft: 288.0,
     quality_flag: 'GOOD',
     latitude: 36.2077,
-    longitude: -119.473,
+    longitude: -119.3473,
     basin_name: 'Kaweah Subbasin (5-022.11)',
   },
 ];
@@ -105,12 +107,13 @@ Meter Number,1008492031
 TYPE,DATE,START TIME,END TIME,USAGE (kWh),COST,NOTES
 Electric usage,2026-05-11,08:00,08:15,22.40,$4.48,Normal irrigation
 Electric usage,2026-05-11,08:15,08:30,22.50,$4.50,Normal irrigation
-Electric usage,2026-05-11,08:30,08:45,5.20,$1.04,Broken suction
-Electric usage,2026-05-11,08:45,09:00,31.60,$6.32,Closed valve deadhead`;
+Electric usage,2026-05-11,08:30,08:45,22.30,$4.46,Normal irrigation
+Electric usage,2026-05-11,08:45,09:00,5.20,$1.04,Broken suction
+Electric usage,2026-05-11,09:00,09:15,31.60,$6.32,Closed valve deadhead`;
 
   const parsed = parsePGEGreenButtonCSV(csv);
   assert.equal(parsed.metadata['Service Agreement ID'], '9482710455');
-  assert.equal(parsed.intervals.length, 4);
+  assert.equal(parsed.intervals.length, 5);
 
   const audit = runCompleteSGMAAudit({
     well: SAMPLE_WELL,
@@ -122,11 +125,44 @@ Electric usage,2026-05-11,08:45,09:00,31.60,$6.32,Closed valve deadhead`;
   });
 
   assert.equal(audit.records[0].status, IntervalStatus.NORMAL);
-  assert.equal(audit.records[2].status, IntervalStatus.SUSPECT_SUCTION_LOSS_OR_IDLE);
-  assert.equal(audit.records[2].calculated_af, 0);
-  assert.equal(audit.records[3].status, IntervalStatus.OVERLOAD_OR_DEADHEAD);
+  assert.equal(audit.records[1].status, IntervalStatus.NORMAL);
+  assert.equal(audit.records[2].status, IntervalStatus.NORMAL);
+  assert.equal(audit.records[3].status, IntervalStatus.SUSPECT_SUCTION_LOSS_OR_IDLE);
   assert.equal(audit.records[3].calculated_af, 0);
+  assert.equal(audit.records[4].status, IntervalStatus.OVERLOAD_OR_DEADHEAD);
+  assert.equal(audit.records[4].calculated_af, 0);
   assert.equal(audit.summary.broken_suction_intervals, 1);
   assert.equal(audit.summary.deadhead_overload_intervals, 1);
   assert.ok(audit.summary.phantom_af_prevented > 0.05);
+});
+
+test('parsePGEDataFile handles quoted CSV cells, US slash dates, 12h AM/PM, and 60-minute hourly intervals', () => {
+  const hourlyCsv = `"Name","HERFURTH FAMILY FARMS"
+"Service Agreement ID","9988776655"
+
+"TYPE","INTERVAL DATE","START TIME","END TIME","USAGE (kWh)","COST ($)","NOTES"
+"Electric usage","4/4/2026","4:00 AM","5:00 AM","88.80","$18.65","North block, valve 1"
+"Electric usage","4/4/2026","5:00 AM","6:00 AM","89.20","$18.73","North block, valve 1"
+"Electric usage","4/4/2026","6:00 AM","7:00 AM","88.40","$18.56","North block, valve 1"`;
+
+  const parsed = parsePGEDataFile(hourlyCsv);
+  assert.equal(parsed.intervals.length, 3);
+  assert.equal(parsed.intervals[0].year_month, '2026-04');
+  assert.equal(parsed.intervals[0].duration_hours, 1.0);
+  assert.equal(parsed.intervals[0].kw_demand, 88.8);
+
+  const bounds = inferPlausibleKwBounds(parsed.intervals);
+  assert.ok(bounds.recommendedMinKw < 88.8 && bounds.recommendedMaxKw > 89.2);
+
+  const audit = runCompleteSGMAAudit({
+    well: SAMPLE_WELL,
+    rawIntervals: parsed.intervals,
+    dwrCatalog: SAMPLE_DWR,
+    landIqBilledAf: 1.5,
+    gsaPenaltyRatePerAf: 185.0,
+    engineMode: 'ENGINE_A_ALGEBRAIC',
+  });
+  assert.equal(audit.summary.monthly_breakdown.length, 1);
+  assert.equal(audit.summary.monthly_breakdown[0].active_pumping_hours, 3.0);
+  assert.ok(audit.summary.total_af_pumped > 0.6);
 });

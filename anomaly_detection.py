@@ -87,7 +87,7 @@ class ForensicAnomalyDetector:
         bowl_depth_ft = (
             well.ope_test_metadata.bowl_intake_depth_ft
             if well.ope_test_metadata is not None
-            else 500.0
+            else max(500.0, well.static_depth_to_water_ft + well.drawdown_ft + 50.0)
         )
         pumping_water_level_ft = interpolated_swl_ft + well.drawdown_ft
 
@@ -110,36 +110,52 @@ class ForensicAnomalyDetector:
         is_deadhead = is_energized & ((kw_arr > well.max_operating_kw) | solver_shutoff)
 
         # 4. Intermittent Cycling detection:
-        #    Detect rapid on/off state transitions in a 6-interval (90-minute) rolling window
-        #    or isolated single-interval fractional starts (< 65% of nominal operating kW)
-        #    where column pipe fills and drains back down the well column without sustained delivery.
+        #    Only flag short, non-sustained active runs (run_length <= 2 consecutive intervals)
+        #    surrounded by rapid on/off transitions within a continuous timestamp window, or
+        #    isolated sub-nominal blips (< 75% of mid operating kW). Never strip intervals from
+        #    a sustained (>= 3 intervals) steady-state irrigation block.
         normal_load_candidate = is_energized & (~is_broken_suction) & (~is_deadhead)
-        state_binary = normal_load_candidate.astype(np.int32)
-        transitions = np.abs(np.diff(state_binary, prepend=state_binary[0]))
+        state_bool = [bool(normal_load_candidate[idx]) for idx in range(n)]
+        epochs = [r.interval_start.timestamp() for r in raw_intervals]
+        durs = [r.duration_hours * 3600.0 for r in raw_intervals]
 
-        # Rolling sum of transitions over 6 intervals (90 minutes)
-        window_size = 6
-        if n >= window_size:
-            kernel = np.ones(window_size, dtype=np.int32)
-            rolling_transitions = np.convolve(transitions, kernel, mode="same")
-        else:
-            rolling_transitions = transitions
+        # Compute contiguous active run length for each interval respecting timestamp continuity
+        run_lengths = [0] * n
+        idx_start = 0
+        while idx_start < n:
+            if not state_bool[idx_start]:
+                idx_start += 1
+                continue
+            idx_end = idx_start
+            while (
+                idx_end + 1 < n
+                and state_bool[idx_end + 1]
+                and (epochs[idx_end + 1] - epochs[idx_end]) <= durs[idx_end] * 1.6
+            ):
+                idx_end += 1
+            length = idx_end - idx_start + 1
+            for k in range(idx_start, idx_end + 1):
+                run_lengths[k] = length
+            idx_start = idx_end + 1
 
-        # Isolated single-interval spike surrounded by off-states with partial load
-        prev_off = np.roll(~normal_load_candidate, 1)
-        prev_off[0] = True
-        next_off = np.roll(~normal_load_candidate, -1)
-        next_off[-1] = True
-        isolated_single_interval = normal_load_candidate & prev_off & next_off
+        transitions = [0] * n
+        for idx in range(1, n):
+            if (epochs[idx] - epochs[idx - 1]) <= durs[idx - 1] * 2.5:
+                if state_bool[idx] != state_bool[idx - 1]:
+                    transitions[idx] = 1
 
         nominal_mid_kw = 0.5 * (well.min_operating_kw + well.max_operating_kw)
-        is_cycling = (
-            normal_load_candidate
-            & (
-                (rolling_transitions >= 3)
-                | (isolated_single_interval & (kw_arr < 0.72 * nominal_mid_kw))
-            )
-        )
+        is_cycling = [False] * n
+        for idx in range(n):
+            if not state_bool[idx] or run_lengths[idx] >= 3:
+                continue
+            win_trans = 0
+            for w in range(max(0, idx - 2), min(n, idx + 4)):
+                if abs(epochs[w] - epochs[idx]) <= 5400.0:
+                    win_trans += transitions[w]
+            isolated_blip = run_lengths[idx] == 1 and float(kw_arr[idx]) < 0.78 * nominal_mid_kw
+            if win_trans >= 3 or isolated_blip:
+                is_cycling[idx] = True
 
         records: List[IntervalAuditRecord] = []
         broken_suction_count = 0

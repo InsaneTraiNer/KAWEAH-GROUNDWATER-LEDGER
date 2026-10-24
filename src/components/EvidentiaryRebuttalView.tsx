@@ -36,7 +36,7 @@ export const EvidentiaryRebuttalView: React.FC<EvidentiaryRebuttalViewProps> = (
 - **1. GSA Land IQ Remote-Sensing ET Billed:** ${summary.land_iq_billed_af.toFixed(2)} AF
 - **2. Audited PG&E Physical Extraction:** ${summary.total_af_pumped.toFixed(2)} AF (Metered ${summary.total_kwh_consumed.toLocaleString('en-US', { minimumFractionDigits: 2 })} kWh)
 - **3. Physical Uncertainty Bracket [Tier 2 (0.53 OPE) – Tier 1 (0.68 OPE)]:** [${summary.uncertainty_bracket_total.af_min.toFixed(2)} – ${summary.uncertainty_bracket_total.af_max.toFixed(2)} AF]
-- **4. Net Satellite Over-Estimation Discrepancy:** +${summary.net_discrepancy_af.toFixed(2)} AF (+${summary.discrepancy_pct.toFixed(1)}%)
+- **4. Net Satellite Over-Estimation Discrepancy:** ${summary.net_discrepancy_af >= 0 ? '+' : ''}${summary.net_discrepancy_af.toFixed(2)} AF (${summary.discrepancy_pct >= 0 ? '+' : ''}${summary.discrepancy_pct.toFixed(1)}%)
 - **5. Contested GSA Over-Pumping Penalty Variance:** $${summary.dollar_variance.toLocaleString('en-US', { minimumFractionDigits: 2 })} (@ $${summary.gsa_penalty_rate_per_af.toFixed(2)}/AF)
 - **6. Phantom Water Excluded via Forensic Filter:** ${summary.phantom_af_prevented.toFixed(3)} AF (${summary.broken_suction_intervals} suction loss, ${summary.deadhead_overload_intervals} deadhead, ${summary.intermittent_cycling_intervals} cycling intervals)
 
@@ -210,7 +210,10 @@ Even at a brand-new factory pump bowl ceiling (Tier 1 OPE = 68.0%), ${summary.to
                       4. Net Satellite Over-Estimation Discrepancy
                     </td>
                     <td className="border border-slate-200 py-2 px-3 text-right font-mono tabular-nums font-semibold text-slate-900">
-                      +{summary.net_discrepancy_af.toFixed(2)} AF (+{summary.discrepancy_pct.toFixed(1)}%)
+                      {summary.net_discrepancy_af >= 0 ? '+' : ''}
+                      {summary.net_discrepancy_af.toFixed(2)} AF (
+                      {summary.discrepancy_pct >= 0 ? '+' : ''}
+                      {summary.discrepancy_pct.toFixed(1)}%)
                     </td>
                     <td className="border border-slate-200 py-2 px-3 text-slate-600">
                       Non-existent groundwater extraction erroneously billed to APN {summary.apn}

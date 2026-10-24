@@ -158,6 +158,22 @@ class TestSGMAExtractionAuditor(unittest.TestCase):
         self.assertIn("ADMINISTRATIVE EVIDENTIARY REBUTTAL", md)
         self.assertIn("California Evidence Code", md)
 
+    def test_adversarial_pge_formats_and_hourly_intervals(self) -> None:
+        # Test quoted CSV cells, US slash dates (M/D/YYYY), 12-hour AM/PM times, and 60-min hourly intervals
+        adversarial_csv = '''"Account Name","HERFURTH FAMILY FARMS"
+"Service Agreement","9988776655"
+
+"TYPE","INTERVAL DATE","START TIME","END TIME","USAGE (kWh)","COST ($)","NOTES"
+"Electric Usage","4/4/2026","4:00 AM","5:00 AM","88.80","$18.65","Steady hourly block, north valve"
+"Electric Usage","4/4/2026","5:00 AM","6:00 AM","89.20","$18.73","Steady hourly block, north valve"
+"Electric Usage","4/4/2026","6:00 AM","7:00 AM","88.40","$18.56","Steady hourly block, north valve"
+'''
+        meta, intervals = PGEGreenButtonParser.parse_csv_string(adversarial_csv)
+        self.assertEqual(len(intervals), 3)
+        self.assertAlmostEqual(intervals[0].duration_hours, 1.0, places=3)
+        # 88.80 kWh over 1.0 hour = 88.80 kW (NOT 355.2 kW!)
+        self.assertAlmostEqual(intervals[0].kw_demand, 88.80, places=2)
+
 
 if __name__ == "__main__":
     unittest.main()

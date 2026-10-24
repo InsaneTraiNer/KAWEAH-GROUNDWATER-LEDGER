@@ -403,7 +403,7 @@ export function buildEvidentiaryHTMLDocument(
     <p>
       <strong>1. GSA Land IQ Remote-Sensing ET Billed:</strong> <span class="mono">${summary.land_iq_billed_af.toFixed(2)} AF</span><br/>
       <strong>2. Audited PG&amp;E Physical Extraction (${summary.engine_mode}):</strong> <span class="mono">${summary.total_af_pumped.toFixed(2)} AF</span> (Uncertainty Bracket: <span class="mono">[${summary.uncertainty_bracket_total.af_min.toFixed(2)} – ${summary.uncertainty_bracket_total.af_max.toFixed(2)} AF]</span>)<br/>
-      <strong>3. Net Satellite Over-Estimation:</strong> <span class="mono">+${summary.net_discrepancy_af.toFixed(2)} AF (+${summary.discrepancy_pct.toFixed(1)}%)</span><br/>
+      <strong>3. Net Satellite Over-Estimation:</strong> <span class="mono">${summary.net_discrepancy_af >= 0 ? '+' : ''}${summary.net_discrepancy_af.toFixed(2)} AF (${summary.discrepancy_pct >= 0 ? '+' : ''}${summary.discrepancy_pct.toFixed(1)}%)</span><br/>
       <strong>4. Contested GSA Tier Penalty Savings:</strong> <span class="mono">$${summary.dollar_variance.toLocaleString('en-US', { minimumFractionDigits: 2 })}</span> (@ $${summary.gsa_penalty_rate_per_af.toFixed(2)}/AF)<br/>
       <strong>5. Implied OPE Required by Land IQ Estimate:</strong> <span class="mono">${impliedOpe.toFixed(1)}%</span> (Thermodynamically impossible vs certified OPE of ${(well.ope * 100).toFixed(1)}%)
     </p>

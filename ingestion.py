@@ -40,7 +40,7 @@ UTC_TZ = timezone.utc
 
 @dataclass(frozen=True)
 class RawEnergyInterval:
-    """Normalized 15-minute PG&E interval measurement in Pacific Time."""
+    """Normalized PG&E interval measurement in Pacific Time (15-min, 30-min, or 60-min)."""
     interval_start: datetime
     interval_end: datetime
     kwh: float
@@ -48,12 +48,17 @@ class RawEnergyInterval:
     notes: Optional[str] = None
 
     @property
+    def duration_hours(self) -> float:
+        """Interval duration in hours (defaults to 0.25 hr if invalid)."""
+        dur = (self.interval_end - self.interval_start).total_seconds() / 3600.0
+        if dur <= 0.0 or dur > 24.0:
+            return 0.25
+        return dur
+
+    @property
     def kw_demand(self) -> float:
-        """Average power demand (kW) across the 15-minute (0.25 hr) interval."""
-        duration_hours = (self.interval_end - self.interval_start).total_seconds() / 3600.0
-        if duration_hours <= 0:
-            duration_hours = 0.25
-        return self.kwh / duration_hours
+        """Average power demand (kW) across the interval duration."""
+        return self.kwh / self.duration_hours
 
 
 class PGEGreenButtonParser:
@@ -61,13 +66,25 @@ class PGEGreenButtonParser:
     Production parser for PG&E Share My Data / Green Button CSV and ESPI XML exports.
     Handles variable-length utility preamble lines (Name, Account, Service Agreement,
     Meter ID), normalizes timestamps into America/Los_Angeles (handling PST/PDT shifts),
-    and validates 15-minute energy intervals.
+    supports 15-minute, 30-minute, and 60-minute interval exports, and validates energy usage.
     """
 
-    REQUIRED_CSV_COLUMNS = {"date", "start time", "usage"}
-    USAGE_ALIASES = ("usage", "usage (kwh)", "kwh", "value", "consumption (kwh)", "energy (kwh)")
-    END_TIME_ALIASES = ("end time", "end")
-    COST_ALIASES = ("cost", "cost ($)", "amount")
+    DATE_ALIASES = ("date", "interval date", "read date", "service date", "bill date")
+    START_ALIASES = ("start time", "start", "interval start", "time", "start datetime", "date/time", "datetime")
+    USAGE_ALIASES = (
+        "usage",
+        "usage (kwh)",
+        "kwh",
+        "value",
+        "consumption (kwh)",
+        "energy (kwh)",
+        "net usage",
+        "delivered (kwh)",
+        "total kwh",
+    )
+    END_TIME_ALIASES = ("end time", "end", "interval end", "end datetime")
+    UNIT_ALIASES = ("units", "unit", "uom")
+    COST_ALIASES = ("cost", "cost ($)", "amount", "charge")
 
     @classmethod
     def parse_file(cls, file_path: Union[str, Path]) -> Tuple[Dict[str, str], List[RawEnergyInterval]]:
@@ -85,7 +102,7 @@ class PGEGreenButtonParser:
     def parse_csv_string(cls, csv_content: str) -> Tuple[Dict[str, str], List[RawEnergyInterval]]:
         """
         Dynamically scans past utility preamble metadata until locating the Green Button
-        tabular header row, then parses and normalizes all 15-minute kWh intervals.
+        tabular header row, then parses and normalizes all energy intervals.
         """
         lines = [line.strip() for line in csv_content.splitlines() if line.strip()]
         if not lines:
@@ -97,14 +114,14 @@ class PGEGreenButtonParser:
 
         for idx, line in enumerate(lines):
             row = next(csv.reader([line]))
-            normalized = [cell.strip().lower() for cell in row if cell.strip()]
-            has_date = any(c in ("date", "interval date", "read date") for c in normalized)
-            has_start = any(c in ("start time", "start", "interval start", "time") for c in normalized)
+            normalized = [cell.strip().lower().lstrip("\ufeff") for cell in row if cell.strip()]
+            has_date = any(c in cls.DATE_ALIASES for c in normalized)
+            has_start = any(c in cls.START_ALIASES for c in normalized)
             has_usage = any(c in cls.USAGE_ALIASES for c in normalized)
 
-            if has_date and has_start and has_usage:
+            if (has_date or has_start) and has_usage:
                 header_idx = idx
-                parsed_header = [cell.strip().lower() for cell in row]
+                parsed_header = [cell.strip().lower().lstrip("\ufeff") for cell in row]
                 break
             elif len(row) >= 2 and row[0].strip():
                 key = row[0].strip().rstrip(":")
@@ -114,50 +131,75 @@ class PGEGreenButtonParser:
         if header_idx is None:
             raise ValueError(
                 "Could not locate valid PG&E Green Button header row containing "
-                "Date, Start Time, and Usage (kWh) columns."
+                "Date/Start Time and Usage (kWh) columns."
             )
 
         col_map: Dict[str, int] = {}
         for i, col_name in enumerate(parsed_header):
-            if col_name in ("date", "interval date", "read date"):
+            if col_name in cls.DATE_ALIASES and "date" not in col_map:
                 col_map["date"] = i
-            elif col_name in ("start time", "start", "interval start", "time"):
+            elif col_name in cls.START_ALIASES and "start_time" not in col_map:
                 col_map["start_time"] = i
-            elif col_name in cls.END_TIME_ALIASES:
+            elif col_name in cls.END_TIME_ALIASES and "end_time" not in col_map:
                 col_map["end_time"] = i
-            elif col_name in cls.USAGE_ALIASES:
+            elif col_name in cls.USAGE_ALIASES and "usage" not in col_map:
                 col_map["usage"] = i
-            elif col_name in cls.COST_ALIASES:
+            elif col_name in cls.UNIT_ALIASES and "units" not in col_map:
+                col_map["units"] = i
+            elif col_name in cls.COST_ALIASES and "cost" not in col_map:
                 col_map["cost"] = i
-            elif col_name in ("notes", "quality", "flags"):
+            elif col_name in ("notes", "quality", "flags") and "notes" not in col_map:
                 col_map["notes"] = i
 
-        intervals: List[RawEnergyInterval] = []
+        if "date" not in col_map and "start_time" in col_map:
+            col_map["date"] = col_map["start_time"]
+        elif "start_time" not in col_map and "date" in col_map:
+            col_map["start_time"] = col_map["date"]
+
+        raw_parsed_rows: List[Tuple[datetime, Optional[datetime], float, Optional[float], Optional[str]]] = []
         reader = csv.reader(lines[header_idx + 1 :])
 
         for row_num, row in enumerate(reader, start=header_idx + 2):
             if not row or all(not cell.strip() for cell in row):
                 continue
-            if len(row) <= max(col_map["date"], col_map["start_time"], col_map["usage"]):
+            req_max = max(col_map["date"], col_map["start_time"], col_map["usage"])
+            if len(row) <= req_max:
                 continue
 
             date_str = row[col_map["date"]].strip()
-            start_str = row[col_map["start_time"]].strip()
-            usage_str = row[col_map["usage"]].strip().replace(",", "")
+            start_str = row[col_map["start_time"]].strip() if col_map["start_time"] != col_map["date"] else ""
+            usage_str = row[col_map["usage"]].strip().replace(",", "").replace("$", "")
 
-            if not date_str or not start_str or not usage_str:
+            if not date_str or not usage_str or usage_str.lower() in ("n/a", "null", "nan", "-"):
                 continue
 
             try:
                 kwh_val = float(usage_str)
-            except ValueError as exc:
-                raise ValueError(f"Invalid kWh value '{usage_str}' at CSV line {row_num}") from exc
+            except ValueError:
+                continue
+
+            if "units" in col_map and col_map["units"] < len(row):
+                unit_str = row[col_map["units"]].strip().lower()
+                if unit_str in ("wh", "watt-hours", "watthours"):
+                    kwh_val = kwh_val / 1000.0
 
             if kwh_val < 0.0:
                 kwh_val = 0.0
 
             start_dt = cls._parse_pacific_datetime(date_str, start_str)
-            end_dt = start_dt + timedelta(minutes=15)
+            end_dt: Optional[datetime] = None
+            if "end_time" in col_map and col_map["end_time"] < len(row):
+                end_str = row[col_map["end_time"]].strip()
+                if end_str:
+                    try:
+                        if end_str.startswith("24:"):
+                            end_dt = cls._parse_pacific_datetime(date_str, "00:00") + timedelta(days=1)
+                        else:
+                            end_dt = cls._parse_pacific_datetime(date_str, end_str)
+                            if end_dt <= start_dt:
+                                end_dt = end_dt + timedelta(days=1)
+                    except ValueError:
+                        end_dt = None
 
             cost_val: Optional[float] = None
             if "cost" in col_map and col_map["cost"] < len(row):
@@ -172,20 +214,39 @@ class PGEGreenButtonParser:
             if "notes" in col_map and col_map["notes"] < len(row):
                 notes_val = row[col_map["notes"]].strip() or None
 
+            raw_parsed_rows.append((start_dt, end_dt, kwh_val, cost_val, notes_val))
+
+        if not raw_parsed_rows:
+            raise ValueError("No valid energy intervals parsed from PG&E CSV.")
+
+        raw_parsed_rows.sort(key=lambda r: r[0])
+
+        # Infer default interval step (e.g. 15 min, 30 min, or 60 min) when end_time is omitted
+        inferred_step = timedelta(minutes=15)
+        if len(raw_parsed_rows) >= 2:
+            diffs = [
+                (raw_parsed_rows[i + 1][0] - raw_parsed_rows[i][0]).total_seconds()
+                for i in range(min(25, len(raw_parsed_rows) - 1))
+                if 300 <= (raw_parsed_rows[i + 1][0] - raw_parsed_rows[i][0]).total_seconds() <= 7200
+            ]
+            if diffs:
+                diffs.sort()
+                median_sec = diffs[len(diffs) // 2]
+                inferred_step = timedelta(seconds=median_sec)
+
+        intervals: List[RawEnergyInterval] = []
+        for start_dt, end_dt, kwh_val, cost_val, notes_val in raw_parsed_rows:
+            resolved_end = end_dt if (end_dt is not None and end_dt > start_dt) else (start_dt + inferred_step)
             intervals.append(
                 RawEnergyInterval(
                     interval_start=start_dt,
-                    interval_end=end_dt,
+                    interval_end=resolved_end,
                     kwh=kwh_val,
                     cost_usd=cost_val,
                     notes=notes_val,
                 )
             )
 
-        if not intervals:
-            raise ValueError("No valid 15-minute intervals parsed from PG&E CSV.")
-
-        intervals.sort(key=lambda r: r.interval_start)
         return metadata, intervals
 
     @classmethod
@@ -193,32 +254,26 @@ class PGEGreenButtonParser:
         """
         Parses ESPI (Energy Services Provider Interface) Green Button Atom XML feeds.
         Extracts ReadingType powerOfTenMultiplier (e.g., Wh to kWh conversion) and
-        IntervalReading timePeriod start (epoch UTC) + duration (900 seconds).
+        IntervalReading timePeriod start (epoch UTC) + duration (900 / 1800 / 3600 seconds).
         """
         root = ET.fromstring(xml_content)
         metadata: Dict[str, str] = {"format": "ESPI_GREEN_BUTTON_XML"}
 
-        # Extract feed title or UsagePoint metadata
         for elem in root.iter():
             tag_local = elem.tag.split("}")[-1]
             if tag_local == "title" and elem.text and "title" not in metadata:
                 metadata["title"] = elem.text.strip()
 
-        # Detect ReadingType multiplier (default Wh = 10^-3 kWh if multiplier is 0 or -3)
         multiplier_to_kwh = 0.001  # Standard ESPI reports in Watt-hours (Wh)
         for elem in root.iter():
             tag_local = elem.tag.split("}")[-1]
             if tag_local == "ReadingType":
                 pow10_text = None
-                uom_text = None
                 for child in elem:
                     c_tag = child.tag.split("}")[-1]
                     if c_tag == "powerOfTenMultiplier" and child.text:
                         pow10_text = int(child.text.strip())
-                    elif c_tag == "uom" and child.text:
-                        uom_text = child.text.strip()
                 if pow10_text is not None:
-                    # UOM 72 is Wh. kWh = value * (10 ** pow10) / 1000.0
                     multiplier_to_kwh = (10.0 ** pow10_text) / 1000.0
 
         intervals: List[RawEnergyInterval] = []
@@ -244,7 +299,7 @@ class PGEGreenButtonParser:
                 if start_epoch is not None and raw_val is not None:
                     utc_start = datetime.fromtimestamp(start_epoch, tz=UTC_TZ)
                     pac_start = utc_start.astimezone(PACIFIC_TZ)
-                    pac_end = pac_start + timedelta(seconds=duration_sec)
+                    pac_end = pac_start + timedelta(seconds=max(60, duration_sec))
                     kwh = max(0.0, raw_val * multiplier_to_kwh)
                     intervals.append(
                         RawEnergyInterval(
@@ -263,18 +318,34 @@ class PGEGreenButtonParser:
     @staticmethod
     def _parse_pacific_datetime(date_str: str, time_str: str) -> datetime:
         """
-        Parses combined date and start time strings and attaches America/Los_Angeles
-        timezone cleanly across Daylight Saving transitions.
+        Parses combined date and start time strings (supporting 24-hour, 12-hour AM/PM,
+        ISO-8601, and US slash dates) and attaches America/Los_Angeles timezone cleanly.
         """
-        # Handle ISO strings if present in date_str
-        combined = f"{date_str} {time_str}".strip()
+        clean_date = date_str.strip()
+        clean_time = time_str.strip().upper()
+        for tz_tok in (" PDT", " PST", " PT", " AMERICA/LOS_ANGELES"):
+            if clean_time.endswith(tz_tok):
+                clean_time = clean_time[: -len(tz_tok)].strip()
+            if clean_date.upper().endswith(tz_tok):
+                clean_date = clean_date[: -len(tz_tok)].strip()
+
+        combined = f"{clean_date} {clean_time}".strip() if clean_time else clean_date
         formats = (
             "%Y-%m-%d %H:%M",
             "%Y-%m-%d %H:%M:%S",
+            "%Y-%m-%d %I:%M %p",
+            "%Y-%m-%d %I:%M:%S %p",
             "%m/%d/%Y %H:%M",
             "%m/%d/%Y %H:%M:%S",
+            "%m/%d/%Y %I:%M %p",
+            "%m/%d/%Y %I:%M:%S %p",
             "%m/%d/%y %H:%M",
+            "%m/%d/%y %H:%M:%S",
+            "%m/%d/%y %I:%M %p",
             "%Y/%m/%d %H:%M",
+            "%Y/%m/%d %I:%M %p",
+            "%Y-%m-%dT%H:%M:%S",
+            "%Y-%m-%dT%H:%M",
         )
         for fmt in formats:
             try:
@@ -283,9 +354,8 @@ class PGEGreenButtonParser:
             except ValueError:
                 continue
 
-        # Fallback ISO parser
         try:
-            dt = datetime.fromisoformat(date_str)
+            dt = datetime.fromisoformat(combined)
             if dt.tzinfo is None:
                 return dt.replace(tzinfo=PACIFIC_TZ)
             return dt.astimezone(PACIFIC_TZ)
@@ -534,6 +604,7 @@ class DWRCasgemConnector:
         interval_timestamps: Sequence[datetime],
         monitoring_records: Sequence[DWRMonitoringRecord],
         fallback_swl_ft: float,
+        apply_wellhead_offset: bool = False,
     ) -> np.ndarray:
         """
         Vectorized piece-wise linear interpolation of Static Water Level (SWL) across
@@ -548,8 +619,15 @@ class DWRCasgemConnector:
             return np.full(n, fallback_swl_ft, dtype=np.float64)
 
         sorted_recs = sorted(monitoring_records, key=lambda r: r.measurement_date)
+        base_station_swl = sorted_recs[0].depth_to_water_ft
+        well_offset = (
+            (fallback_swl_ft - base_station_swl)
+            if (apply_wellhead_offset and fallback_swl_ft > 0.0)
+            else 0.0
+        )
+
         if len(sorted_recs) == 1:
-            return np.full(n, sorted_recs[0].depth_to_water_ft, dtype=np.float64)
+            return np.full(n, max(0.0, sorted_recs[0].depth_to_water_ft + well_offset), dtype=np.float64)
 
         # Convert monitoring dates to epoch seconds at noon Pacific Time
         anchor_epochs = np.array(
@@ -560,7 +638,7 @@ class DWRCasgemConnector:
             dtype=np.float64,
         )
         anchor_depths = np.array(
-            [r.depth_to_water_ft for r in sorted_recs],
+            [max(0.0, r.depth_to_water_ft + well_offset) for r in sorted_recs],
             dtype=np.float64,
         )
 

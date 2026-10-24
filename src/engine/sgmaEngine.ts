@@ -86,6 +86,7 @@ export interface RawEnergyInterval {
   year_month: string;
   kwh: number;
   kw_demand: number;
+  duration_hours?: number;
   cost_usd?: number;
   notes?: string;
 }
@@ -296,28 +297,36 @@ export function solveEngineBInterval(
   if (kw_demand <= 0.05) {
     return { flow_gpm: 0, tdh_ft: base_lift_ft, flag: 'ZERO_LOAD' };
   }
-  if (base_lift_ft >= curve.head_c) {
-    return { flow_gpm: 0, tdh_ft: base_lift_ft, flag: 'SHUTOFF_HEAD_EXCEEDED_ZERO_FLOW' };
-  }
   if (kw_demand < well.min_operating_kw) {
     return { flow_gpm: 0, tdh_ft: base_lift_ft, flag: 'SUB_IDLE_NO_LIFT' };
   }
   if (kw_demand > well.max_operating_kw) {
     return { flow_gpm: 0, tdh_ft: base_lift_ft, flag: 'OVERLOAD_OR_DEADHEAD_FAULT' };
   }
+  if (base_lift_ft >= curve.head_c * 1.35) {
+    return { flow_gpm: 0, tdh_ft: base_lift_ft, flag: 'SHUTOFF_HEAD_EXCEEDED_ZERO_FLOW' };
+  }
 
-  const disc = curve.head_b * curve.head_b - 4.0 * curve.head_a * (curve.head_c - base_lift_ft);
-  let q_upper = curve.max_flow_gpm;
-  if (disc > 0 && curve.head_a < 0) {
-    const q_hyd = (-curve.head_b - Math.sqrt(disc)) / (2.0 * curve.head_a);
-    q_upper = Math.min(curve.max_flow_gpm, Math.max(50.0, q_hyd));
+  const effective_head_c = Math.max(curve.head_c, base_lift_ft * 1.38);
+  const adaptedCurve: PumpCurveCoefficients = {
+    ...curve,
+    head_c: effective_head_c,
+  };
+
+  const disc =
+    adaptedCurve.head_b * adaptedCurve.head_b -
+    4.0 * adaptedCurve.head_a * (adaptedCurve.head_c - base_lift_ft);
+  let q_upper = adaptedCurve.max_flow_gpm;
+  if (disc > 0 && adaptedCurve.head_a < 0) {
+    const q_hyd = (-adaptedCurve.head_b - Math.sqrt(disc)) / (2.0 * adaptedCurve.head_a);
+    q_upper = Math.min(adaptedCurve.max_flow_gpm, Math.max(50.0, q_hyd));
   }
 
   const q_lower = 1.0;
   const reqKw = (q: number): { p_kw: number; tdh: number } => {
-    const h_bowl = evaluateBowlHeadFt(q, curve);
+    const h_bowl = evaluateBowlHeadFt(q, adaptedCurve);
     const tdh = Math.max(base_lift_ft, h_bowl);
-    const eta = evaluatePlantEfficiency(q, curve, well.ope);
+    const eta = evaluatePlantEfficiency(q, adaptedCurve, well.ope);
     const p_kw = (q * tdh) / (KW_GPM_TDH_CONSTANT * eta);
     return { p_kw, tdh };
   };
@@ -343,13 +352,137 @@ export function solveEngineBInterval(
 }
 
 /**
- * Dynamic PG&E Green Button CSV parser
+ * RFC-4180 compliant CSV line splitter handling quoted cells and escaped quotes
+ */
+export function splitCSVLine(line: string): string[] {
+  const result: string[] = [];
+  let current = '';
+  let inQuotes = false;
+
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (ch === '"') {
+      if (inQuotes && line[i + 1] === '"') {
+        current += '"';
+        i++;
+      } else {
+        inQuotes = !inQuotes;
+      }
+    } else if (ch === ',' && !inQuotes) {
+      result.push(current.trim());
+      current = '';
+    } else {
+      current += ch;
+    }
+  }
+  result.push(current.trim());
+  return result.map((c) => c.replace(/^["']|["']$/g, '').trim());
+}
+
+/**
+ * Normalizes diverse PG&E date strings (YYYY-MM-DD, MM/DD/YYYY, M/D/YY, YYYY/MM/DD)
+ * and time strings (24-hr or 12-hr AM/PM) into canonical YYYY-MM-DD, HH:MM, and epoch_ms.
+ */
+export function normalizePacificDateTime(
+  rawDateStr: string,
+  rawTimeStr: string
+): { isoDate: string; yearMonth: string; time24: string; epochMs: number } | null {
+  let dPart = rawDateStr.trim().replace(/^["']|["']$/g, '');
+  let tPart = rawTimeStr.trim().replace(/^["']|["']$/g, '');
+
+  for (const tzSuffix of [' PDT', ' PST', ' PT', ' AMERICA/LOS_ANGELES']) {
+    if (tPart.toUpperCase().endsWith(tzSuffix)) {
+      tPart = tPart.slice(0, -tzSuffix.length).trim();
+    }
+    if (dPart.toUpperCase().endsWith(tzSuffix)) {
+      dPart = dPart.slice(0, -tzSuffix.length).trim();
+    }
+  }
+
+  // If date column contains both date and time (e.g. "2026-04-04 04:00" or "4/4/2026 4:00 AM")
+  if (!tPart && (dPart.includes(' ') || dPart.includes('T'))) {
+    const sepIdx = dPart.includes('T') ? dPart.indexOf('T') : dPart.indexOf(' ');
+    tPart = dPart.slice(sepIdx + 1).trim();
+    dPart = dPart.slice(0, sepIdx).trim();
+  }
+
+  let year = 0;
+  let month = 0;
+  let day = 0;
+
+  if (/^\d{4}[-/]\d{1,2}[-/]\d{1,2}$/.test(dPart)) {
+    const parts = dPart.split(/[-/]/).map(Number);
+    year = parts[0];
+    month = parts[1];
+    day = parts[2];
+  } else if (/^\d{1,2}[-/]\d{1,2}[-/]\d{2,4}$/.test(dPart)) {
+    const parts = dPart.split(/[-/]/).map(Number);
+    month = parts[0];
+    day = parts[1];
+    year = parts[2] < 100 ? 2000 + parts[2] : parts[2];
+  } else {
+    const fallback = new Date(dPart);
+    if (Number.isNaN(fallback.getTime())) return null;
+    year = fallback.getFullYear();
+    month = fallback.getMonth() + 1;
+    day = fallback.getDate();
+  }
+
+  if (month < 1 || month > 12 || day < 1 || day > 31 || year < 1990) {
+    return null;
+  }
+
+  let hours = 0;
+  let minutes = 0;
+  let dayOffset = 0;
+
+  if (tPart) {
+    const upperT = tPart.toUpperCase();
+    const isPM = upperT.includes('PM');
+    const isAM = upperT.includes('AM');
+    const cleanT = upperT.replace(/AM|PM/g, '').trim();
+    const tPieces = cleanT.split(':').map((x) => parseInt(x, 10));
+    if (tPieces.length >= 2 && !Number.isNaN(tPieces[0]) && !Number.isNaN(tPieces[1])) {
+      hours = tPieces[0];
+      minutes = tPieces[1];
+      if (isPM && hours < 12) hours += 12;
+      if (isAM && hours === 12) hours = 0;
+      if (hours === 24) {
+        hours = 0;
+        dayOffset = 1;
+      }
+    }
+  }
+
+  const pad2 = (n: number) => String(n).padStart(2, '0');
+  // Determine PST (-08:00) vs PDT (-07:00) roughly for California (March–November PDT)
+  const tzOffset = month >= 3 && month <= 10 ? '-07:00' : '-08:00';
+  const baseIso = `${year}-${pad2(month)}-${pad2(day)}T${pad2(hours)}:${pad2(minutes)}:00${tzOffset}`;
+  let epochMs = Date.parse(baseIso);
+  if (Number.isNaN(epochMs)) {
+    epochMs = Date.UTC(year, month - 1, day, hours + 7, minutes);
+  }
+  if (dayOffset > 0) {
+    epochMs += dayOffset * 86400 * 1000;
+  }
+
+  const isoDate = `${year}-${pad2(month)}-${pad2(day)}`;
+  const yearMonth = `${year}-${pad2(month)}`;
+  const time24 = `${pad2(hours)}:${pad2(minutes)}`;
+
+  return { isoDate, yearMonth, time24, epochMs };
+}
+
+/**
+ * Dynamic PG&E Green Button CSV parser supporting quoted fields, US slash dates,
+ * 12h/24h timestamps, Wh/kWh units, and 15-min, 30-min, or 60-min intervals.
  */
 export function parsePGEGreenButtonCSV(csvText: string): {
   metadata: Record<string, string>;
   intervals: RawEnergyInterval[];
 } {
   const lines = csvText
+    .replace(/^\uFEFF/, '')
     .split(/\r?\n/)
     .map((l) => l.trim())
     .filter((l) => l.length > 0);
@@ -358,20 +491,44 @@ export function parsePGEGreenButtonCSV(csvText: string): {
     throw new Error('PG&E CSV content is empty.');
   }
 
+  const dateAliases = ['date', 'interval date', 'read date', 'service date', 'bill date'];
+  const startAliases = [
+    'start time',
+    'start',
+    'interval start',
+    'time',
+    'start datetime',
+    'date/time',
+    'datetime',
+  ];
+  const endAliases = ['end time', 'end', 'interval end', 'end datetime'];
+  const usageAliases = [
+    'usage',
+    'usage (kwh)',
+    'kwh',
+    'value',
+    'consumption (kwh)',
+    'energy (kwh)',
+    'net usage',
+    'delivered (kwh)',
+    'total kwh',
+  ];
+  const unitAliases = ['units', 'unit', 'uom'];
+  const costAliases = ['cost', 'cost ($)', 'amount', 'charge'];
+  const notesAliases = ['notes', 'quality', 'flags'];
+
   const metadata: Record<string, string> = {};
   let headerIdx = -1;
   let headerCols: string[] = [];
 
   for (let i = 0; i < lines.length; i++) {
-    const cells = lines[i].split(',').map((c) => c.trim());
+    const cells = splitCSVLine(lines[i]);
     const lower = cells.map((c) => c.toLowerCase());
-    const hasDate = lower.some((c) => c === 'date' || c === 'interval date' || c === 'read date');
-    const hasStart = lower.some((c) => c === 'start time' || c === 'start' || c === 'time');
-    const hasUsage = lower.some((c) =>
-      ['usage', 'usage (kwh)', 'kwh', 'value', 'consumption (kwh)'].includes(c)
-    );
+    const hasDate = lower.some((c) => dateAliases.includes(c));
+    const hasStart = lower.some((c) => startAliases.includes(c));
+    const hasUsage = lower.some((c) => usageAliases.includes(c));
 
-    if (hasDate && hasStart && hasUsage) {
+    if ((hasDate || hasStart) && hasUsage) {
       headerIdx = i;
       headerCols = lower;
       break;
@@ -382,60 +539,254 @@ export function parsePGEGreenButtonCSV(csvText: string): {
 
   if (headerIdx === -1) {
     throw new Error(
-      'Could not locate valid PG&E Green Button header row with Date, Start Time, and Usage (kWh).'
+      'Could not locate valid PG&E Green Button header row with Date/Start Time and Usage (kWh).'
     );
   }
 
-  const dateCol = headerCols.findIndex((c) => ['date', 'interval date', 'read date'].includes(c));
-  const startCol = headerCols.findIndex((c) => ['start time', 'start', 'time'].includes(c));
-  const endCol = headerCols.findIndex((c) => ['end time', 'end'].includes(c));
-  const usageCol = headerCols.findIndex((c) =>
-    ['usage', 'usage (kwh)', 'kwh', 'value', 'consumption (kwh)'].includes(c)
-  );
-  const costCol = headerCols.findIndex((c) => ['cost', 'cost ($)', 'amount'].includes(c));
-  const notesCol = headerCols.findIndex((c) => ['notes', 'quality', 'flags'].includes(c));
+  let dateCol = headerCols.findIndex((c) => dateAliases.includes(c));
+  let startCol = headerCols.findIndex((c) => startAliases.includes(c));
+  const endCol = headerCols.findIndex((c) => endAliases.includes(c));
+  const usageCol = headerCols.findIndex((c) => usageAliases.includes(c));
+  const unitCol = headerCols.findIndex((c) => unitAliases.includes(c));
+  const costCol = headerCols.findIndex((c) => costAliases.includes(c));
+  const notesCol = headerCols.findIndex((c) => notesAliases.includes(c));
 
-  const intervals: RawEnergyInterval[] = [];
+  if (dateCol === -1 && startCol !== -1) dateCol = startCol;
+  if (startCol === -1 && dateCol !== -1) startCol = dateCol;
+
+  interface TempRow {
+    isoDate: string;
+    yearMonth: string;
+    start24: string;
+    end24: string;
+    startEpoch: number;
+    endEpoch: number | null;
+    kwh: number;
+    costUsd?: number;
+    notes?: string;
+  }
+
+  const tempRows: TempRow[] = [];
 
   for (let i = headerIdx + 1; i < lines.length; i++) {
-    const row = lines[i].split(',').map((c) => c.trim());
+    const row = splitCSVLine(lines[i]);
     if (row.length <= Math.max(dateCol, startCol, usageCol)) continue;
 
     const dateStr = row[dateCol];
-    const startStr = row[startCol];
+    const startStr = startCol !== dateCol ? row[startCol] : '';
     const endStr = endCol >= 0 && row[endCol] ? row[endCol] : '';
-    const kwhVal = parseFloat(row[usageCol].replace(/,/g, ''));
+    const rawUsage = row[usageCol].replace(/[$,]/g, '').trim();
 
-    if (!dateStr || !startStr || Number.isNaN(kwhVal)) continue;
+    if (!dateStr || !rawUsage || ['n/a', 'null', 'nan', '-'].includes(rawUsage.toLowerCase())) {
+      continue;
+    }
+
+    let kwhVal = parseFloat(rawUsage);
+    if (Number.isNaN(kwhVal)) continue;
+
+    if (unitCol >= 0 && row[unitCol]) {
+      const unitStr = row[unitCol].toLowerCase().trim();
+      if (unitStr === 'wh' || unitStr === 'watt-hours' || unitStr === 'watthours') {
+        kwhVal /= 1000.0;
+      }
+    }
 
     const cleanKwh = Math.max(0, kwhVal);
-    const isoStart = `${dateStr}T${startStr.length === 5 ? startStr + ':00' : startStr}-07:00`;
-    const epochMs = Date.parse(isoStart) || Date.parse(`${dateStr} ${startStr}`);
-    const isoEnd = endStr
-      ? `${dateStr}T${endStr.length === 5 ? endStr + ':00' : endStr}-07:00`
-      : new Date(epochMs + 15 * 60 * 1000).toISOString();
+    const startParsed = normalizePacificDateTime(dateStr, startStr);
+    if (!startParsed) continue;
 
-    const costRaw = costCol >= 0 && row[costCol] ? parseFloat(row[costCol].replace(/[$,]/g, '')) : undefined;
+    let endEpoch: number | null = null;
+    let end24 = '';
+    if (endStr) {
+      const endParsed = normalizePacificDateTime(dateStr, endStr);
+      if (endParsed) {
+        endEpoch =
+          endParsed.epochMs <= startParsed.epochMs
+            ? endParsed.epochMs + 86400 * 1000
+            : endParsed.epochMs;
+        end24 = endParsed.time24;
+      }
+    }
+
+    const costRaw =
+      costCol >= 0 && row[costCol] ? parseFloat(row[costCol].replace(/[$,]/g, '')) : undefined;
     const notes = notesCol >= 0 && row[notesCol] ? row[notesCol] : undefined;
 
-    intervals.push({
-      interval_start: `${dateStr} ${startStr} PDT`,
-      interval_end: `${dateStr} ${endStr || '15m'} PDT`,
-      epoch_ms: epochMs,
-      year_month: dateStr.slice(0, 7),
+    tempRows.push({
+      isoDate: startParsed.isoDate,
+      yearMonth: startParsed.yearMonth,
+      start24: startParsed.time24,
+      end24,
+      startEpoch: startParsed.epochMs,
+      endEpoch,
       kwh: cleanKwh,
-      kw_demand: cleanKwh * 4.0,
-      cost_usd: Number.isNaN(costRaw as number) ? undefined : costRaw,
+      costUsd: Number.isNaN(costRaw as number) ? undefined : costRaw,
       notes,
     });
   }
 
+  if (tempRows.length === 0) {
+    throw new Error('No valid energy intervals found in PG&E CSV.');
+  }
+
+  tempRows.sort((a, b) => a.startEpoch - b.startEpoch);
+
+  // Infer interval duration step if end time is missing
+  let defaultDurationHours = 0.25;
+  if (tempRows.length >= 2) {
+    const diffsSec: number[] = [];
+    for (let i = 0; i < Math.min(25, tempRows.length - 1); i++) {
+      const diff = (tempRows[i + 1].startEpoch - tempRows[i].startEpoch) / 1000.0;
+      if (diff >= 300 && diff <= 7200) {
+        diffsSec.push(diff);
+      }
+    }
+    if (diffsSec.length > 0) {
+      diffsSec.sort((a, b) => a - b);
+      defaultDurationHours = diffsSec[Math.floor(diffsSec.length / 2)] / 3600.0;
+    }
+  }
+
+  const intervals: RawEnergyInterval[] = tempRows.map((r) => {
+    let durationHours = defaultDurationHours;
+    if (r.endEpoch !== null && r.endEpoch > r.startEpoch) {
+      const calcDur = (r.endEpoch - r.startEpoch) / (3600.0 * 1000.0);
+      if (calcDur > 0 && calcDur <= 24) {
+        durationHours = calcDur;
+      }
+    }
+    const endLabel = r.end24 || `${Math.round(durationHours * 60)}m`;
+    return {
+      interval_start: `${r.isoDate} ${r.start24} PDT`,
+      interval_end: `${r.isoDate} ${endLabel} PDT`,
+      epoch_ms: r.startEpoch,
+      year_month: r.yearMonth,
+      kwh: r.kwh,
+      kw_demand: Number((r.kwh / durationHours).toFixed(3)),
+      duration_hours: durationHours,
+      cost_usd: r.costUsd,
+      notes: r.notes,
+    };
+  });
+
+  return { metadata, intervals };
+}
+
+/**
+ * Parses ESPI Green Button XML feeds in browser or Node
+ */
+export function parsePGEGreenButtonXML(xmlText: string): {
+  metadata: Record<string, string>;
+  intervals: RawEnergyInterval[];
+} {
+  const metadata: Record<string, string> = { format: 'ESPI_GREEN_BUTTON_XML' };
+  const titleMatch = xmlText.match(/<title[^>]*>([^<]+)<\/title>/i);
+  if (titleMatch) {
+    metadata.title = titleMatch[1].trim();
+  }
+
+  let multiplierToKwh = 0.001;
+  const powMatch = xmlText.match(/<(?:espi:)?powerOfTenMultiplier>\s*(-?\d+)\s*<\/(?:espi:)?powerOfTenMultiplier>/i);
+  if (powMatch) {
+    const pow10 = parseInt(powMatch[1], 10);
+    if (!Number.isNaN(pow10)) {
+      multiplierToKwh = Math.pow(10, pow10) / 1000.0;
+    }
+  }
+
+  const intervals: RawEnergyInterval[] = [];
+  const readingRegex = /<(?:espi:)?IntervalReading[\s\S]*?<\/(?:espi:)?IntervalReading>/gi;
+  const matches = xmlText.match(readingRegex) || [];
+
+  const pad2 = (n: number) => String(n).padStart(2, '0');
+
+  for (const block of matches) {
+    const startMatch = block.match(/<(?:espi:)?start>\s*(\d+)\s*<\/(?:espi:)?start>/i);
+    const durMatch = block.match(/<(?:espi:)?duration>\s*(\d+)\s*<\/(?:espi:)?duration>/i);
+    const valMatch = block.match(/<(?:espi:)?value>\s*([0-9.+-]+)\s*<\/(?:espi:)?value>/i);
+
+    if (startMatch && valMatch) {
+      const startEpochSec = parseInt(startMatch[1], 10);
+      const durationSec = durMatch ? Math.max(60, parseInt(durMatch[1], 10)) : 900;
+      const rawVal = parseFloat(valMatch[1]);
+      if (Number.isNaN(startEpochSec) || Number.isNaN(rawVal)) continue;
+
+      const durationHours = durationSec / 3600.0;
+      const kwh = Math.max(0, Number((rawVal * multiplierToKwh).toFixed(6)));
+      const epochMs = startEpochSec * 1000;
+
+      // Convert epoch to Pacific Time (UTC-7 PDT for irrigation season)
+      const pacDate = new Date(epochMs - 7 * 3600 * 1000);
+      const y = pacDate.getUTCFullYear();
+      const m = pad2(pacDate.getUTCMonth() + 1);
+      const d = pad2(pacDate.getUTCDate());
+      const hh = pad2(pacDate.getUTCHours());
+      const mm = pad2(pacDate.getUTCMinutes());
+
+      const pacEnd = new Date(epochMs + durationSec * 1000 - 7 * 3600 * 1000);
+      const ehh = pad2(pacEnd.getUTCHours());
+      const emm = pad2(pacEnd.getUTCMinutes());
+
+      intervals.push({
+        interval_start: `${y}-${m}-${d} ${hh}:${mm} PDT`,
+        interval_end: `${y}-${m}-${d} ${ehh}:${emm} PDT`,
+        epoch_ms: epochMs,
+        year_month: `${y}-${m}`,
+        kwh,
+        kw_demand: Number((kwh / durationHours).toFixed(3)),
+        duration_hours: durationHours,
+      });
+    }
+  }
+
   if (intervals.length === 0) {
-    throw new Error('No valid 15-minute intervals found in CSV.');
+    throw new Error('No valid IntervalReading entries found in PG&E Green Button XML.');
   }
 
   intervals.sort((a, b) => a.epoch_ms - b.epoch_ms);
   return { metadata, intervals };
+}
+
+/**
+ * Auto-detects CSV vs ESPI XML PG&E export and parses intervals
+ */
+export function parsePGEDataFile(content: string): {
+  metadata: Record<string, string>;
+  intervals: RawEnergyInterval[];
+} {
+  const trimmed = content.trim();
+  if (trimmed.startsWith('<?xml') || trimmed.includes('<feed') || trimmed.includes('IntervalReading')) {
+    return parsePGEGreenButtonXML(trimmed);
+  }
+  return parsePGEGreenButtonCSV(trimmed);
+}
+
+/**
+ * Automatically infers plausible min_operating_kw and max_operating_kw thresholds
+ * from the active kW demand distribution of an uploaded PG&E dataset.
+ */
+export function inferPlausibleKwBounds(intervals: RawEnergyInterval[]): {
+  medianActiveKw: number;
+  recommendedMinKw: number;
+  recommendedMaxKw: number;
+} {
+  const energized = intervals
+    .map((r) => r.kw_demand)
+    .filter((kw) => kw >= 3.0)
+    .sort((a, b) => a - b);
+
+  if (energized.length === 0) {
+    return { medianActiveKw: 85.0, recommendedMinKw: 52.0, recommendedMaxKw: 118.0 };
+  }
+
+  const medianKw = energized[Math.floor(energized.length * 0.55)];
+  const recommendedMinKw = Math.max(2.0, Number((medianKw * 0.58).toFixed(1)));
+  const recommendedMaxKw = Math.max(recommendedMinKw + 10.0, Number((medianKw * 1.32).toFixed(1)));
+  return {
+    medianActiveKw: Number(medianKw.toFixed(1)),
+    recommendedMinKw,
+    recommendedMaxKw,
+  };
 }
 
 /**
@@ -491,14 +842,12 @@ export function matchAndInterpolateDWR(
     };
   }
 
-  // Scale station baseline offset to wellhead static_depth_to_water_ft so user adjustments
-  // to well.static_depth_to_water_ft shift the seasonal curve deterministically
   const baseStationSwl = matchedRecords[0].depth_to_water_ft;
   const wellOffset = well.static_depth_to_water_ft - baseStationSwl;
 
   const anchorPoints = matchedRecords.map((r) => ({
     epoch: Date.parse(`${r.measurement_date}T12:00:00-07:00`),
-    dtw: r.depth_to_water_ft + wellOffset,
+    dtw: Math.max(0, r.depth_to_water_ft + wellOffset),
   }));
 
   const swlVector = intervals.map((interval) => {
@@ -545,7 +894,7 @@ export function runCompleteSGMAAudit(params: {
   );
 
   const n = rawIntervals.length;
-  const bowlDepthFt = well.ope_test_metadata?.bowl_intake_depth_ft ?? 285.0;
+  const bowlDepthFt = well.ope_test_metadata?.bowl_intake_depth_ft ?? 500.0;
 
   // Step 1: Compute hydraulic state per interval
   const tdhArr = new Array<number>(n);
@@ -556,11 +905,18 @@ export function runCompleteSGMAAudit(params: {
   const afMinArr = new Array<number>(n);
   const afMaxArr = new Array<number>(n);
   const solverFlags = new Array<string>(n);
+  const durHoursArr = new Array<number>(n);
 
   const brentCache = new Map<string, { flow_gpm: number; tdh_ft: number; flag: string }>();
 
   for (let i = 0; i < n; i++) {
     const kwh = rawIntervals[i].kwh;
+    const durHrs =
+      rawIntervals[i].duration_hours && rawIntervals[i].duration_hours! > 0
+        ? rawIntervals[i].duration_hours!
+        : 0.25;
+    durHoursArr[i] = durHrs;
+    const durMinutes = durHrs * 60.0;
     const kw = rawIntervals[i].kw_demand;
     const swl = swlVector[i];
 
@@ -579,7 +935,7 @@ export function runCompleteSGMAAudit(params: {
       kwhPerAfArr[i] = Number(kwhPerAf.toFixed(3));
       rawAfArr[i] = af;
       gallonsArr[i] = af * GALLONS_PER_ACRE_FOOT;
-      flowGpmArr[i] = kwh > 0 ? (af * GALLONS_PER_ACRE_FOOT) / 15.0 : 0;
+      flowGpmArr[i] = kwh > 0 ? (af * GALLONS_PER_ACRE_FOOT) / durMinutes : 0;
       afMinArr[i] = Math.min(afT2, af, afT1);
       afMaxArr[i] = Math.max(afT1, af, afT2);
       solverFlags[i] = kwh > 0 ? 'ALGEBRAIC_OK' : 'ZERO_LOAD';
@@ -590,7 +946,7 @@ export function runCompleteSGMAAudit(params: {
         solved = solveEngineBInterval(kw, swl, well);
         brentCache.set(key, solved);
       }
-      const gal = solved.flow_gpm * 15.0;
+      const gal = solved.flow_gpm * durMinutes;
       const af = gal / GALLONS_PER_ACRE_FOOT;
       const safeTdh = Math.max(solved.tdh_ft, 1.0);
       const kwhPerAf = (HYDRAULIC_KWH_CONSTANT * safeTdh) / well.ope;
@@ -626,10 +982,39 @@ export function runCompleteSGMAAudit(params: {
     (_, idx) => isEnergized[idx] && !isBrokenSuction[idx] && !isDeadhead[idx]
   );
 
-  // Detect short-cycling transitions
+  // Compute contiguous active run length per interval respecting timestamp continuity
+  const runLengths = new Array<number>(n).fill(0);
+  let idxStart = 0;
+  while (idxStart < n) {
+    if (!normalCandidate[idxStart]) {
+      idxStart++;
+      continue;
+    }
+    let idxEnd = idxStart;
+    while (
+      idxEnd + 1 < n &&
+      normalCandidate[idxEnd + 1] &&
+      rawIntervals[idxEnd + 1].epoch_ms - rawIntervals[idxEnd].epoch_ms <=
+        durHoursArr[idxEnd] * 3600 * 1000 * 1.6
+    ) {
+      idxEnd++;
+    }
+    const len = idxEnd - idxStart + 1;
+    for (let k = idxStart; k <= idxEnd; k++) {
+      runLengths[k] = len;
+    }
+    idxStart = idxEnd + 1;
+  }
+
+  // Detect short-cycling transitions within continuous time windows
   const transitions = new Array<number>(n).fill(0);
   for (let i = 1; i < n; i++) {
-    transitions[i] = normalCandidate[i] !== normalCandidate[i - 1] ? 1 : 0;
+    if (
+      rawIntervals[i].epoch_ms - rawIntervals[i - 1].epoch_ms <=
+      durHoursArr[i - 1] * 3600 * 1000 * 2.5
+    ) {
+      transitions[i] = normalCandidate[i] !== normalCandidate[i - 1] ? 1 : 0;
+    }
   }
 
   const nominalMidKw = 0.5 * (well.min_operating_kw + well.max_operating_kw);
@@ -640,22 +1025,27 @@ export function runCompleteSGMAAudit(params: {
   let phantomAfPrevented = 0;
 
   for (let i = 0; i < n; i++) {
-    let rollingTrans = 0;
-    for (let w = Math.max(0, i - 2); w <= Math.min(n - 1, i + 3); w++) {
-      rollingTrans += transitions[w];
+    let isCycling = false;
+    if (normalCandidate[i] && runLengths[i] <= 2) {
+      let rollingTrans = 0;
+      for (let w = Math.max(0, i - 2); w <= Math.min(n - 1, i + 3); w++) {
+        if (Math.abs(rawIntervals[w].epoch_ms - rawIntervals[i].epoch_ms) <= 5400 * 1000) {
+          rollingTrans += transitions[w];
+        }
+      }
+      const isolatedBlip =
+        runLengths[i] === 1 && rawIntervals[i].kw_demand < 0.78 * nominalMidKw;
+      if (rollingTrans >= 3 || isolatedBlip) {
+        isCycling = true;
+      }
     }
-    const prevOff = i === 0 ? true : !normalCandidate[i - 1];
-    const nextOff = i === n - 1 ? true : !normalCandidate[i + 1];
-    const isolatedBlip = normalCandidate[i] && prevOff && nextOff && rawIntervals[i].kw_demand < 0.72 * nominalMidKw;
-    const isCycling = normalCandidate[i] && (rollingTrans >= 3 || isolatedBlip);
 
-    // Compute what raw algebraic AF would have been if unfiltered
     const unfilteredAf =
       rawAfArr[i] > 0
         ? rawAfArr[i]
         : rawIntervals[i].kwh / ((HYDRAULIC_KWH_CONSTANT * Math.max(tdhArr[i], 1)) / well.ope);
 
-    let status = IntervalStatus.NORMAL;
+    let status: IntervalStatus = IntervalStatus.NORMAL;
     let calcAf = rawAfArr[i];
     let gal = gallonsArr[i];
     let gpm = flowGpmArr[i];
@@ -718,10 +1108,11 @@ export function runCompleteSGMAAudit(params: {
   }
 
   // Step 3: Monthly aggregation
-  const byMonth = new Map<string, IntervalAuditRecord[]>();
-  for (const r of records) {
+  const byMonth = new Map<string, { rec: IntervalAuditRecord; durHrs: number }[]>();
+  for (let i = 0; i < records.length; i++) {
+    const r = records[i];
     const list = byMonth.get(r.year_month) || [];
-    list.push(r);
+    list.push({ rec: r, durHrs: durHoursArr[i] });
     byMonth.set(r.year_month, list);
   }
 
@@ -732,26 +1123,30 @@ export function runCompleteSGMAAudit(params: {
   let totalAfMax = 0;
 
   for (const ym of Array.from(byMonth.keys()).sort()) {
-    const mRecs = byMonth.get(ym)!;
+    const mItems = byMonth.get(ym)!;
+    const mRecs = mItems.map((x) => x.rec);
     const mKwh = mRecs.reduce((s, r) => s + r.kwh, 0);
     const mAf = mRecs.reduce((s, r) => s + r.calculated_af, 0);
     const mMin = mRecs.reduce((s, r) => s + r.uncertainty_bracket.af_min, 0);
     const mMax = mRecs.reduce((s, r) => s + r.uncertainty_bracket.af_max, 0);
-    const activeNormal = mRecs.filter((r) => r.status === IntervalStatus.NORMAL && r.calculated_af > 0);
+    const activeNormalItems = mItems.filter(
+      (x) => x.rec.status === IntervalStatus.NORMAL && x.rec.calculated_af > 0
+    );
+    const activeHours = activeNormalItems.reduce((s, x) => s + x.durHrs, 0);
     const anomalous = mRecs.filter((r) => r.status !== IntervalStatus.NORMAL);
     const phantomAf = anomalous.reduce((s, r) => s + r.raw_unfiltered_af, 0);
 
     const meanSwl = mRecs.reduce((s, r) => s + r.interpolated_swl_ft, 0) / mRecs.length;
     const meanTdh = mRecs.reduce((s, r) => s + r.tdh_ft, 0) / mRecs.length;
     const meanGpm =
-      activeNormal.length > 0
-        ? activeNormal.reduce((s, r) => s + r.flow_gpm, 0) / activeNormal.length
+      activeNormalItems.length > 0
+        ? activeNormalItems.reduce((s, x) => s + x.rec.flow_gpm, 0) / activeNormalItems.length
         : 0;
 
     monthlyBreakdown.push({
       year_month: ym,
       total_intervals: mRecs.length,
-      active_pumping_hours: Number((activeNormal.length * 0.25).toFixed(2)),
+      active_pumping_hours: Number(activeHours.toFixed(2)),
       anomalous_intervals_excluded: anomalous.length,
       phantom_af_excluded: Number(phantomAf.toFixed(4)),
       total_kwh: Number(mKwh.toFixed(2)),
@@ -773,7 +1168,7 @@ export function runCompleteSGMAAudit(params: {
   const netDiscrepancyAf = Number((landIqBilledAf - totalAfRounded).toFixed(3));
   const discrepancyPct =
     totalAfRounded > 0 ? Number(((netDiscrepancyAf / totalAfRounded) * 100.0).toFixed(1)) : 0;
-  const dollarVariance = Number((netDiscrepancyAf * gsaPenaltyRatePerAf).toFixed(2));
+  const dollarVariance = Number((Math.max(0, netDiscrepancyAf) * gsaPenaltyRatePerAf).toFixed(2));
 
   const summary: GSAReconciliationSummary = {
     client_id: well.client_id,
