@@ -3,8 +3,10 @@ SGMA Extraction Auditor & Water Ledger Engine
 Module: test_auditor.py
 
 Unit test suite validating Pydantic v2 schemas, PG&E Green Button CSV/XML ingestion,
-DWR CASGEM seasonal SWL interpolation, Engine A (Algebraic) & Engine B (Brentq Non-Linear)
-hydraulics, forensic anomaly detection, and GSA Evidentiary Rebuttal Packet generation.
+official DWR / GSA Representative Monitoring Network seasonal SWL interpolation,
+Engine A (Standard Evidentiary Efficiency-Lift Algebraic Ledger) hydraulics against
+published UC ANR / CSU Fresno CIT benchmarks, forensic anomaly detection, and GSA
+Evidentiary Rebuttal Packet generation.
 """
 
 from __future__ import annotations
@@ -21,14 +23,11 @@ except ImportError:
 
 from anomaly_detection import ForensicAnomalyDetector
 from audit_report import AuditReportGenerator
-from hydraulics import HydraulicEngineA, HydraulicEngineB
-from ingestion import DWRCasgemConnector, PGEGreenButtonParser, RawEnergyInterval
+from hydraulics import HydraulicEngineA
+from ingestion import DWRCasgemConnector, PGEGreenButtonParser
 from schemas import (
-    DWRMonitoringRecord,
     EfficiencySource,
-    IntervalStatus,
     OPETestMetadata,
-    PumpCurveCoefficients,
     WellProfile,
 )
 
@@ -45,8 +44,8 @@ class TestSGMAExtractionAuditor(unittest.TestCase):
             gsa_name="Greater Kaweah GSA",
             service_agreement_id="9482710455",
             meter_id="1008492031",
-            latitude=36.2077,
-            longitude=-119.3473,
+            latitude=36.1737,
+            longitude=-119.4798,
             static_depth_to_water_ft=148.0,
             drawdown_ft=31.5,
             discharge_pressure_psi=28.0,
@@ -60,11 +59,10 @@ class TestSGMAExtractionAuditor(unittest.TestCase):
                 measured_flow_gpm=1145.0,
                 measured_tdh_ft=250.98,
                 measured_kw_input=88.8,
-                bowl_intake_depth_ft=265.0,
+                bowl_intake_depth_ft=285.0,
             ),
             min_operating_kw=52.0,
             max_operating_kw=118.0,
-            pump_curve=PumpCurveCoefficients(),
         )
 
     def test_well_profile_validation_and_tdh(self) -> None:
@@ -100,20 +98,28 @@ class TestSGMAExtractionAuditor(unittest.TestCase):
 
     def test_dwr_casgem_matching_and_interpolation(self) -> None:
         site_code, recs = DWRCasgemConnector.match_closest_monitoring_well(self.well)
-        self.assertEqual(site_code, "362077N1193473W001")
-        self.assertGreaterEqual(len(recs), 2)
+        self.assertEqual(site_code, "361737N1194798W003")
+        self.assertGreaterEqual(len(recs), 5)
+        self.assertIn("Department of Water Resources", recs[0].monitoring_agency)
+
+        # Verify 18-character DWR site_code coordinate decoding
+        lat, lon = DWRCasgemConnector.decode_site_code_coords("361737N1194798W003")
+        self.assertAlmostEqual(lat or 0.0, 36.1737, places=4)
+        self.assertAlmostEqual(lon or 0.0, -119.4798, places=4)
 
         ts = [
-            datetime(2026, 3, 18, 12, 0, tzinfo=PACIFIC_TZ),
-            datetime(2026, 7, 15, 12, 0, tzinfo=PACIFIC_TZ),
-            datetime(2026, 10, 22, 12, 0, tzinfo=PACIFIC_TZ),
+            datetime(2026, 3, 1, 12, 0, tzinfo=PACIFIC_TZ),
+            datetime(2026, 6, 1, 12, 0, tzinfo=PACIFIC_TZ),
+            datetime(2026, 9, 1, 12, 0, tzinfo=PACIFIC_TZ),
         ]
-        swl_vec = DWRCasgemConnector.interpolate_seasonal_swl_vector(ts, recs, 148.0)
-        self.assertAlmostEqual(float(swl_vec[0]), 142.4, places=1)
-        self.assertAlmostEqual(float(swl_vec[2]), 169.8, places=1)
+        swl_vec = DWRCasgemConnector.interpolate_seasonal_swl_vector(
+            ts, recs, 148.0, apply_wellhead_offset=False
+        )
+        self.assertAlmostEqual(float(swl_vec[0]), 197.93, places=1)
+        self.assertAlmostEqual(float(swl_vec[2]), 257.96, places=1)
         self.assertTrue(float(swl_vec[0]) < float(swl_vec[1]) < float(swl_vec[2]))
 
-    def test_engine_a_and_engine_b_hydraulics(self) -> None:
+    def test_engine_a_hydraulics_and_published_benchmarks(self) -> None:
         kwh_vec = np.array([22.2, 5.1, 31.8, 0.0], dtype=float)
         swl_vec = np.array([148.0, 148.0, 148.0, 148.0], dtype=float)
 
@@ -121,21 +127,18 @@ class TestSGMAExtractionAuditor(unittest.TestCase):
         # At TDH=250.98 and OPE=0.61: kWh/AF = (1.024 * 250.98) / 0.61 = 421.3174
         self.assertAlmostEqual(float(res_a.kwh_per_af[0]), 421.3174, places=3)
         self.assertAlmostEqual(float(res_a.raw_af[0]), 22.2 / 421.3174, places=5)
+        # At 88.8 kW (22.2 kWh in 15 min), solved flow matches certified 1145 GPM within 0.05%
+        self.assertAlmostEqual(float(res_a.flow_gpm[0]), 1144.7, places=1)
         self.assertLess(float(res_a.af_min_tier2[0]), float(res_a.af_expected_tier3[0]))
         self.assertGreater(float(res_a.af_max_tier1[0]), float(res_a.af_expected_tier3[0]))
 
-        res_b = HydraulicEngineB.evaluate_intervals(kwh_vec, swl_vec, self.well)
-        self.assertEqual(res_b.solver_flags[0], "BRENTQ_CONVERGED")
-        self.assertGreater(float(res_b.flow_gpm[0]), 900.0)
-        self.assertEqual(res_b.solver_flags[1], "SUB_IDLE_NO_LIFT")
-        self.assertEqual(res_b.solver_flags[2], "OVERLOAD_OR_DEADHEAD_FAULT")
-        self.assertEqual(res_b.solver_flags[3], "ZERO_LOAD")
-
     def test_forensic_anomaly_detection_and_report(self) -> None:
         _, raw_intervals = PGEGreenButtonParser.parse_file(Path("./data/pge_sample.csv"))
-        _, dwr_recs = DWRCasgemConnector.match_closest_monitoring_well(self.well)
+        site_code, dwr_recs = DWRCasgemConnector.match_closest_monitoring_well(self.well)
         ts = [r.interval_start for r in raw_intervals]
-        swl_vec = DWRCasgemConnector.interpolate_seasonal_swl_vector(ts, dwr_recs, 148.0)
+        swl_vec = DWRCasgemConnector.interpolate_seasonal_swl_vector(
+            ts, dwr_recs, 148.0, apply_wellhead_offset=True
+        )
         kwh_vec = np.array([r.kwh for r in raw_intervals], dtype=float)
         hyd = HydraulicEngineA.evaluate_intervals(kwh_vec, swl_vec, self.well)
 
@@ -150,16 +153,18 @@ class TestSGMAExtractionAuditor(unittest.TestCase):
             audit_batch=batch,
             land_iq_billed_af=145.2,
             gsa_penalty_rate_per_af=185.0,
+            dwr_site_code=site_code,
         )
+        self.assertEqual(summary.dwr_monitoring_site_used, "361737N1194798W003")
         self.assertGreater(summary.net_discrepancy_af, 30.0)
         self.assertGreater(summary.dollar_variance, 5000.0)
 
         md = AuditReportGenerator.render_markdown_rebuttal(self.well, summary)
         self.assertIn("ADMINISTRATIVE EVIDENTIARY REBUTTAL", md)
-        self.assertIn("California Evidence Code", md)
+        self.assertIn("361737N1194798W003", md)
+        self.assertIn("1220", md)
 
     def test_adversarial_pge_formats_and_hourly_intervals(self) -> None:
-        # Test quoted CSV cells, US slash dates (M/D/YYYY), 12-hour AM/PM times, and 60-min hourly intervals
         adversarial_csv = '''"Account Name","HERFURTH FAMILY FARMS"
 "Service Agreement","9988776655"
 
@@ -171,7 +176,6 @@ class TestSGMAExtractionAuditor(unittest.TestCase):
         meta, intervals = PGEGreenButtonParser.parse_csv_string(adversarial_csv)
         self.assertEqual(len(intervals), 3)
         self.assertAlmostEqual(intervals[0].duration_hours, 1.0, places=3)
-        # 88.80 kWh over 1.0 hour = 88.80 kW (NOT 355.2 kW!)
         self.assertAlmostEqual(intervals[0].kw_demand, 88.80, places=2)
 
 

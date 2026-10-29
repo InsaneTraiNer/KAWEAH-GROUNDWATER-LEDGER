@@ -1,62 +1,44 @@
 import React, { useState } from 'react';
 import {
   computeTDH,
-  evaluateBowlHeadFt,
-  evaluatePlantEfficiency,
+  DWRMonitoringRecord,
   GSAReconciliationSummary,
-  solveEngineBInterval,
   WellProfile,
 } from '../engine/sgmaEngine';
 
 interface HydraulicChartsProps {
   well: WellProfile;
   summary: GSAReconciliationSummary;
+  matchedDwrRecords: DWRMonitoringRecord[];
 }
 
-export const HydraulicCharts: React.FC<HydraulicChartsProps> = ({ well, summary }) => {
-  const [activeChartTab, setActiveChartTab] = useState<'seasonal' | 'bowl_curve'>('seasonal');
-  const [testKwInput, setTestKwInput] = useState<number>(
-    well.ope_test_metadata?.measured_kw_input ?? 88.8
-  );
+export const HydraulicCharts: React.FC<HydraulicChartsProps> = ({
+  well,
+  summary,
+  matchedDwrRecords,
+}) => {
+  const [activeChartTab, setActiveChartTab] = useState<'seasonal' | 'dwr_telemetry'>('seasonal');
 
   const months = summary.monthly_breakdown;
   const maxMonthAf = Math.max(
     ...months.map((m) => m.tier1_mfg_ceiling_af * 1.45),
-    summary.land_iq_billed_af / Math.max(months.length, 1) * 1.4,
+    (summary.land_iq_billed_af / Math.max(months.length, 1)) * 1.4,
     25
   );
 
   // Allocate Land IQ satellite ET proportionally across months to contrast against physical lift
   const totalVerified = Math.max(summary.total_af_pumped, 0.001);
 
-  // Engine B Pump Curve points Q from 0 to max_flow_gpm
-  const curve = well.pump_curve;
   const nominalTdh = computeTDH(
     well.static_depth_to_water_ft,
     well.drawdown_ft,
     well.discharge_pressure_psi,
     well.friction_loss_ft
   );
-  const solvedPoint = solveEngineBInterval(
-    testKwInput,
-    well.static_depth_to_water_ft,
-    well
-  );
-
-  const qSteps = 40;
-  const curvePoints: Array<{ q: number; head: number; effPct: number; kwReq: number }> = [];
-  for (let i = 0; i <= qSteps; i++) {
-    const q = (curve.max_flow_gpm / qSteps) * i;
-    const head = evaluateBowlHeadFt(q, curve);
-    const eff = evaluatePlantEfficiency(q, curve, well.ope);
-    const tdhEff = Math.max(nominalTdh, head);
-    const kwReq = q > 0 ? (q * tdhEff) / (5308.0 * eff) : 0;
-    curvePoints.push({ q, head, effPct: eff * 100, kwReq });
-  }
 
   return (
     <section
-      aria-label="Hydraulic Telemetry and Operating Point Visualizations"
+      aria-label="Hydraulic Telemetry and Official DWR Groundwater Soundings"
       className="bg-white border border-slate-200 p-5"
     >
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-slate-200">
@@ -65,7 +47,7 @@ export const HydraulicCharts: React.FC<HydraulicChartsProps> = ({ well, summary 
             01. Hydraulic &amp; Seasonal Extraction Telemetry
           </h2>
           <p className="text-xs text-slate-500 mt-0.5">
-            DWR Station {summary.dwr_monitoring_site_used} · Nominal TDH{' '}
+            DWR Station <span className="font-mono text-slate-700">{summary.dwr_monitoring_site_used}</span> ({summary.dwr_monitoring_agency}) · Nominal TDH{' '}
             <span className="font-mono tabular-nums text-slate-700">
               {nominalTdh.toFixed(2)} ft
             </span>{' '}
@@ -97,15 +79,15 @@ export const HydraulicCharts: React.FC<HydraulicChartsProps> = ({ well, summary 
           <button
             type="button"
             role="tab"
-            aria-selected={activeChartTab === 'bowl_curve'}
-            onClick={() => setActiveChartTab('bowl_curve')}
+            aria-selected={activeChartTab === 'dwr_telemetry'}
+            onClick={() => setActiveChartTab('dwr_telemetry')}
             className={`px-3 py-1.5 text-xs font-medium rounded transition-colors whitespace-nowrap shrink-0 ${
-              activeChartTab === 'bowl_curve'
+              activeChartTab === 'dwr_telemetry'
                 ? 'bg-white text-slate-900 shadow-xs'
                 : 'text-slate-600 hover:text-slate-900'
             }`}
           >
-            Engine B Non-Linear Bowl Curve (Brentq)
+            Official DWR / GSA Soundings ({matchedDwrRecords.length})
           </button>
         </div>
       </div>
@@ -324,201 +306,60 @@ export const HydraulicCharts: React.FC<HydraulicChartsProps> = ({ well, summary 
           </div>
         </div>
       ) : (
-        <div className="pt-4">
-          <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-3 bg-slate-50 border border-slate-200 p-3">
-            <div className="flex items-center gap-3">
-              <label
-                htmlFor="brentq-kw-probe"
-                className="text-xs font-medium text-slate-700 whitespace-nowrap"
-              >
-                Interval Power Probe (kW):
-              </label>
-              <input
-                id="brentq-kw-probe"
-                type="range"
-                min={10}
-                max={145}
-                step={0.5}
-                value={testKwInput}
-                onChange={(e) => setTestKwInput(parseFloat(e.target.value))}
-                className="w-40 accent-sky-600"
-              />
-              <span className="font-mono tabular-nums text-xs font-semibold text-slate-900">
-                {testKwInput.toFixed(1)} kW
+        <div className="pt-4 space-y-3">
+          <div className="bg-slate-50 border border-slate-200 p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
+            <div>
+              <span className="font-semibold text-slate-900">
+                Matched Official Station:
+              </span>{' '}
+              <span className="font-mono text-sky-700 font-semibold">
+                {summary.dwr_monitoring_site_used}
+              </span>{' '}
+              <span className="text-slate-600">
+                ({well.latitude.toFixed(4)}° N, {well.longitude.toFixed(4)}° W)
               </span>
             </div>
-
-            <div className="flex flex-wrap items-center gap-3 text-xs font-mono tabular-nums">
-              <span className="text-slate-600">
-                Solved Flow Q*:{' '}
-                <strong className="text-sky-700">{solvedPoint.flow_gpm.toFixed(1)} GPM</strong>
-              </span>
-              <span aria-hidden="true">·</span>
-              <span className="text-slate-600">
-                Effective TDH*:{' '}
-                <strong className="text-slate-900">{solvedPoint.tdh_ft.toFixed(1)} ft</strong>
-              </span>
-              <span aria-hidden="true">·</span>
-              <span className="text-slate-600">
-                Solver State: <strong className="text-slate-900">{solvedPoint.flag}</strong>
-              </span>
+            <div className="text-slate-600">
+              Admissible under <strong>Cal. Evid. Code § 1280</strong> (Official Records) &amp;{' '}
+              <strong>§ 1220</strong> (GSA Party Admission)
             </div>
           </div>
 
-          <div className="w-full overflow-x-auto">
-            <svg
-              viewBox="0 0 820 260"
-              className="w-full h-60 min-w-[600px]"
-              role="img"
-              aria-label="Engine B Non-Linear Pump Bowl Head-Capacity Curve H(Q) and Wire-to-Water Efficiency Curve"
-            >
-              {/* Grid lines */}
-              {[0, 0.25, 0.5, 0.75, 1].map((frac, idx) => {
-                const y = 215 - frac * 180;
-                const headLabel = (frac * curve.head_c * 1.1).toFixed(0);
-                const effLabel = (frac * 100).toFixed(0);
-                return (
-                  <g key={idx}>
-                    <line
-                      x1={56}
-                      y1={y}
-                      x2={760}
-                      y2={y}
-                      stroke="#e2e8f0"
-                      strokeDasharray={idx === 0 ? undefined : '3 3'}
-                    />
-                    <text
-                      x={48}
-                      y={y + 4}
-                      textAnchor="end"
-                      className="fill-slate-600 font-mono text-[10px]"
-                    >
-                      {headLabel} ft
-                    </text>
-                    <text
-                      x={768}
-                      y={y + 4}
-                      textAnchor="start"
-                      className="fill-emerald-700 font-mono text-[10px]"
-                    >
-                      {effLabel}% OPE
-                    </text>
-                  </g>
-                );
-              })}
-
-              {/* X-axis flow ticks */}
-              {[0, 0.25, 0.5, 0.75, 1].map((frac, idx) => {
-                const x = 56 + frac * 704;
-                const qLabel = (frac * curve.max_flow_gpm).toFixed(0);
-                return (
-                  <g key={idx}>
-                    <line x1={x} y1={215} x2={x} y2={220} stroke="#94a3b8" />
-                    <text
-                      x={x}
-                      y={236}
-                      textAnchor="middle"
-                      className="fill-slate-600 font-mono text-[10px]"
-                    >
-                      {qLabel} GPM
-                    </text>
-                  </g>
-                );
-              })}
-
-              {/* System Nominal TDH Horizontal Reference Line */}
-              {(() => {
-                const maxH = curve.head_c * 1.1;
-                const sysY = 215 - Math.min(1, nominalTdh / maxH) * 180;
-                return (
-                  <g>
-                    <line
-                      x1={56}
-                      y1={sysY}
-                      x2={760}
-                      y2={sysY}
-                      stroke="#64748b"
-                      strokeWidth={1.5}
-                      strokeDasharray="6 4"
-                    />
-                    <text
-                      x={64}
-                      y={sysY - 6}
-                      className="fill-slate-600 font-mono text-[10px]"
-                    >
-                      System Lift Requirement (TDH = {nominalTdh.toFixed(1)} ft)
-                    </text>
-                  </g>
-                );
-              })()}
-
-              {/* Bowl Head Polynomial H(Q) */}
-              <polyline
-                fill="none"
-                stroke="#0284c7"
-                strokeWidth={2.5}
-                points={curvePoints
-                  .map((pt) => {
-                    const x = 56 + (pt.q / curve.max_flow_gpm) * 704;
-                    const y = 215 - (pt.head / (curve.head_c * 1.1)) * 180;
-                    return `${x},${y}`;
-                  })
-                  .join(' ')}
-              />
-
-              {/* Efficiency Curve eta(Q) */}
-              <polyline
-                fill="none"
-                stroke="#059669"
-                strokeWidth={2}
-                strokeDasharray="4 2"
-                points={curvePoints
-                  .map((pt) => {
-                    const x = 56 + (pt.q / curve.max_flow_gpm) * 704;
-                    const y = 215 - (pt.effPct / 100) * 180;
-                    return `${x},${y}`;
-                  })
-                  .join(' ')}
-              />
-
-              {/* Solved Brentq Operating Point Marker */}
-              {solvedPoint.flow_gpm > 0 && (
-                <g>
-                  {(() => {
-                    const cx = 56 + (solvedPoint.flow_gpm / curve.max_flow_gpm) * 704;
-                    const cy = 215 - (solvedPoint.tdh_ft / (curve.head_c * 1.1)) * 180;
-                    return (
-                      <>
-                        <line
-                          x1={cx}
-                          y1={35}
-                          x2={cx}
-                          y2={215}
-                          stroke="#e11d48"
-                          strokeWidth={1}
-                          strokeDasharray="2 2"
-                        />
-                        <circle
-                          cx={cx}
-                          cy={cy}
-                          r={5.5}
-                          fill="#e11d48"
-                          stroke="#ffffff"
-                          strokeWidth={2}
-                        />
-                        <text
-                          x={Math.min(cx + 10, 620)}
-                          y={Math.max(cy - 10, 48)}
-                          className="fill-rose-700 font-mono text-[10.5px] font-semibold"
-                        >
-                          Brentq Root ({solvedPoint.flow_gpm.toFixed(0)} GPM, {solvedPoint.tdh_ft.toFixed(1)} ft)
-                        </text>
-                      </>
-                    );
-                  })()}
-                </g>
-              )}
-            </svg>
+          <div className="overflow-x-auto max-h-64 border border-slate-200">
+            <table className="w-full text-xs border-collapse">
+              <thead className="bg-slate-50 text-slate-700 sticky top-0">
+                <tr>
+                  <th className="border-b border-slate-200 py-2 px-3 text-left">Date</th>
+                  <th className="border-b border-slate-200 py-2 px-3 text-left">State Well / Site Code</th>
+                  <th className="border-b border-slate-200 py-2 px-3 text-right">Depth to Water (ft bgs)</th>
+                  <th className="border-b border-slate-200 py-2 px-3 text-right">GSE (ft NAVD88)</th>
+                  <th className="border-b border-slate-200 py-2 px-3 text-left">Measurement Method</th>
+                  <th className="border-b border-slate-200 py-2 px-3 text-left">Co-Monitoring Agency</th>
+                  <th className="border-b border-slate-200 py-2 px-3 text-left">QA Flag</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-200 font-mono tabular-nums">
+                {matchedDwrRecords.map((rec, idx) => (
+                  <tr key={`${rec.site_code}-${rec.measurement_date}-${idx}`} className="hover:bg-slate-50">
+                    <td className="py-1.5 px-3 text-slate-900">{rec.measurement_date}</td>
+                    <td className="py-1.5 px-3 text-sky-700 font-medium">{rec.site_code}</td>
+                    <td className="py-1.5 px-3 text-right font-semibold text-slate-900">
+                      {rec.depth_to_water_ft.toFixed(2)} ft
+                    </td>
+                    <td className="py-1.5 px-3 text-right text-slate-600">
+                      {rec.ground_surface_elevation_ft.toFixed(2)} ft
+                    </td>
+                    <td className="py-1.5 px-3 font-sans text-slate-700">
+                      {rec.measurement_method || 'Electronic pressure transducer'}
+                    </td>
+                    <td className="py-1.5 px-3 font-sans text-slate-700">
+                      {rec.monitoring_agency || 'Department of Water Resources'}
+                    </td>
+                    <td className="py-1.5 px-3 text-emerald-700 font-semibold">{rec.quality_flag}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         </div>
       )}

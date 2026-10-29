@@ -6,8 +6,8 @@
   "gsa_name": "Greater Kaweah GSA",
   "service_agreement_id": "9482710455",
   "meter_id": "1008492031",
-  "latitude": 36.2077,
-  "longitude": -119.3473,
+  "latitude": 36.1737,
+  "longitude": -119.4798,
   "static_depth_to_water_ft": 148.0,
   "drawdown_ft": 31.5,
   "discharge_pressure_psi": 28.0,
@@ -21,17 +21,8 @@
     "measured_flow_gpm": 1145.0,
     "measured_tdh_ft": 250.98,
     "measured_kw_input": 88.8,
-    "bowl_intake_depth_ft": 265.0
+    "bowl_intake_depth_ft": 285.0
   },
   "min_operating_kw": 52.0,
-  "max_operating_kw": 118.0,
-  "pump_curve": {
-    "head_a": -0.0000485,
-    "head_b": -0.012,
-    "head_c": 345.0,
-    "eff_a": -0.00000052,
-    "eff_b": 0.00118,
-    "eff_c": 0.05,
-    "max_flow_gpm": 2200.0
-  }
+  "max_operating_kw": 118.0
 }

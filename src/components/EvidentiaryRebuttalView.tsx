@@ -30,7 +30,8 @@ export const EvidentiaryRebuttalView: React.FC<EvidentiaryRebuttalViewProps> = (
 **Statutory Authority:** California Water Code § 10720 et seq.; § 10726.4; 23 CCR § 354.18
 **Grower / Legal Entity:** ${summary.client_id} | **APN:** ${summary.apn} | **Well ID:** ${summary.well_id}
 **PG&E Service Agreement ID:** ${well.service_agreement_id} | **SmartMeter ID:** ${well.meter_id}
-**DWR CASGEM Monitoring Site:** ${summary.dwr_monitoring_site_used} | **Hydraulic Solver:** ${summary.engine_mode}
+**DWR CASGEM Monitoring Site:** ${summary.dwr_monitoring_site_used} (${summary.dwr_monitoring_agency})
+**Measurement Method:** ${summary.dwr_measurement_method} | **Hydraulic Solver:** ${summary.engine_mode}
 
 ## I. EXECUTIVE RECONCILIATION SUMMARY
 - **1. GSA Land IQ Remote-Sensing ET Billed:** ${summary.land_iq_billed_af.toFixed(2)} AF
@@ -48,7 +49,7 @@ Even at a brand-new factory pump bowl ceiling (Tier 1 OPE = 68.0%), ${summary.to
 
 ## III. CALIFORNIA EVIDENCE CODE & SGMA LEGAL ARGUMENT
 1. **CPUC Revenue-Grade Metering (Cal. Evid. Code § 1271):** PG&E SmartMeter ${well.meter_id} is governed by CPUC Electric Tariff Rule 17 and ANSI C12.20 (±0.2% accuracy).
-2. **Official DWR Soundings (Cal. Evid. Code § 1280):** DWR CASGEM Station ${summary.dwr_monitoring_site_used} provides official state groundwater elevation records.
+2. **Official DWR & GSA Groundwater Soundings (Cal. Evid. Code §§ 1280, 1220, 452(c)):** DWR CASGEM Station ${summary.dwr_monitoring_site_used} is monitored by ${summary.dwr_monitoring_agency} via ${summary.dwr_measurement_method}, constituting self-authenticating official public records (§ 1280) and an admission of a party opponent where co-monitored by the GSA (§ 1220).
 3. **Inadmissibility of Uncalibrated Canopy ET Proxies to Override Physical Metering (Water Code § 10726.4 & 23 CCR § 354.18):** Remote-sensing evapotranspiration measures vegetative canopy vapor flux, conflating vadose-zone winter rainfall storage, capillary fringe uptake, cover crop transpiration, and surface canal seepage with groundwater pumping.`;
 
   const handleCopyMarkdown = () => {
@@ -154,6 +155,13 @@ Even at a brand-new factory pump bowl ceiling (Tier 1 OPE = 68.0%), ${summary.to
               APN: <strong className="font-mono text-slate-900">{summary.apn}</strong>
               <span aria-hidden="true"> · </span>
               Well ID: <strong className="font-mono text-slate-900">{summary.well_id}</strong>
+            </div>
+            <div className="text-xs text-slate-600 mt-1">
+              DWR CASGEM Station: <strong className="font-mono text-slate-900">{summary.dwr_monitoring_site_used}</strong>
+              <span aria-hidden="true"> · </span>
+              Monitoring Agency: <strong className="text-slate-900">{summary.dwr_monitoring_agency}</strong>
+              <span aria-hidden="true"> · </span>
+              Instrument: <strong className="text-slate-900">{summary.dwr_measurement_method}</strong>
             </div>
           </div>
 
@@ -332,10 +340,13 @@ Even at a brand-new factory pump bowl ceiling (Tier 1 OPE = 68.0%), ${summary.to
               business records admissible under California Evidence Code § 1271.
             </p>
             <p>
-              <strong>2. Official Hydrologic Records (Cal. Evid. Code § 1280):</strong>{' '}
+              <strong>2. Official State &amp; GSA Hydrologic Records (Cal. Evid. Code §§ 1280, 1220, 452(c)):</strong>{' '}
               Groundwater depth soundings from DWR CASGEM Station{' '}
-              <span className="font-mono">{summary.dwr_monitoring_site_used}</span> constitute official state records
-              under California Evidence Code § 1280 and 23 CCR § 354.34.
+              <span className="font-mono font-semibold">{summary.dwr_monitoring_site_used}</span> (recorded by{' '}
+              <strong>{summary.dwr_monitoring_agency}</strong> using{' '}
+              <strong>{summary.dwr_measurement_method}</strong>) constitute self-authenticating official records under
+              California Evidence Code § 1280, judicially noticeable state acts under § 452(c), and party-opponent
+              admissions under § 1220 where co-monitored by the GSA.
             </p>
             <p>
               <strong>3. Inadmissibility of Satellite Canopy ET Proxies to Override Physical Metering (Water Code § 10726.4 &amp; 23 CCR § 354.18):</strong>{' '}

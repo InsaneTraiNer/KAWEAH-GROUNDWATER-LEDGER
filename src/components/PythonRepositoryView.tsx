@@ -4,13 +4,11 @@ import { PYTHON_REPO_FILES } from '../data/pythonRepoFiles';
 interface PythonRepositoryViewProps {
   landIqAf: number;
   gsaPenaltyRate: number;
-  engineMode: 'ENGINE_A_ALGEBRAIC' | 'ENGINE_B_SCIPY_BRENTQ_NONLINEAR';
 }
 
 export const PythonRepositoryView: React.FC<PythonRepositoryViewProps> = ({
   landIqAf,
   gsaPenaltyRate,
-  engineMode,
 }) => {
   const [selectedFilename, setSelectedFilename] = useState<string>('schemas.py');
   const [copiedBanner, setCopiedBanner] = useState<string | null>(null);
@@ -21,10 +19,9 @@ export const PythonRepositoryView: React.FC<PythonRepositoryViewProps> = ({
   const cliCommand = `python cli_runner.py audit \\
   --pge-csv ./data/pge_sample.csv \\
   --well-config ./data/well_config.json \\
+  --dwr-csv ./data/dwr_casgem_sample.csv \\
   --land-iq-af ${landIqAf.toFixed(1)} \\
-  --gsa-penalty-rate ${gsaPenaltyRate.toFixed(2)}${
-    engineMode === 'ENGINE_B_SCIPY_BRENTQ_NONLINEAR' ? ' \\\n  --engine B' : ''
-  } \\
+  --gsa-penalty-rate ${gsaPenaltyRate.toFixed(2)} \\
   --output ./reports/audit_2026.html`;
 
   const handleCopyCode = (text: string, label: string) => {

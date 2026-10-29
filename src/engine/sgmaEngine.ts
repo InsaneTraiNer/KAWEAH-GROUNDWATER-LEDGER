@@ -1,6 +1,6 @@
 /**
  * SGMA Extraction Auditor & Water Ledger Engine
- * Pure TypeScript Deterministic Hydraulic, Forensic & Rebuttal Engine
+ * Pure TypeScript Deterministic Hydraulic (Engine A), DWR Telemetry, Forensic & Rebuttal Engine
  * Mirrors the production Python modules (schemas.py, ingestion.py, hydraulics.py,
  * anomaly_detection.py, audit_report.py) with 1:1 mathematical parity.
  */
@@ -19,16 +19,6 @@ export const IntervalStatus = {
   INTERMITTENT_CYCLING: 'INTERMITTENT_CYCLING',
 } as const;
 export type IntervalStatus = (typeof IntervalStatus)[keyof typeof IntervalStatus];
-
-export interface PumpCurveCoefficients {
-  head_a: number;
-  head_b: number;
-  head_c: number;
-  eff_a: number;
-  eff_b: number;
-  eff_c: number;
-  max_flow_gpm: number;
-}
 
 export interface OPETestMetadata {
   test_date: string;
@@ -59,7 +49,6 @@ export interface WellProfile {
   ope_test_metadata?: OPETestMetadata;
   min_operating_kw: number;
   max_operating_kw: number;
-  pump_curve: PumpCurveCoefficients;
 }
 
 export interface DWRMonitoringRecord {
@@ -71,6 +60,8 @@ export interface DWRMonitoringRecord {
   latitude: number;
   longitude: number;
   basin_name: string;
+  measurement_method?: string;
+  monitoring_agency?: string;
 }
 
 export interface UncertaintyBracket {
@@ -133,7 +124,7 @@ export interface GSAReconciliationSummary {
   gsa_name: string;
   audit_period_start: string;
   audit_period_end: string;
-  engine_mode: 'ENGINE_A_ALGEBRAIC' | 'ENGINE_B_SCIPY_BRENTQ_NONLINEAR';
+  engine_mode: 'ENGINE_A_ALGEBRAIC_LEDGER';
   total_kwh_consumed: number;
   total_af_pumped: number;
   uncertainty_bracket_total: UncertaintyBracket;
@@ -148,6 +139,8 @@ export interface GSAReconciliationSummary {
   dollar_variance: number;
   evidentiary_confidence_tier: EfficiencySource;
   dwr_monitoring_site_used: string;
+  dwr_monitoring_agency: string;
+  dwr_measurement_method: string;
   monthly_breakdown: MonthlyExtractionSummary[];
 }
 
@@ -159,89 +152,8 @@ export const TIER1_MANUFACTURER_OPE = 0.68;
 export const TIER2_REGIONAL_OPE = 0.53;
 
 /**
- * Richard Brent's root-finding algorithm (matches scipy.optimize.brentq)
- */
-export function brentqSolver(
-  f: (x: number) => number,
-  a: number,
-  b: number,
-  xtol = 1e-4,
-  maxiter = 100
-): number {
-  let xpre = a;
-  let xcur = b;
-  let fpre = f(xpre);
-  let fcur = f(xcur);
-
-  if (fpre * fcur > 0) {
-    throw new Error(`Root not bracketed on [${a}, ${b}]: f(a)=${fpre}, f(b)=${fcur}`);
-  }
-  if (fpre === 0) return xpre;
-  if (fcur === 0) return xcur;
-
-  let xblk = xpre;
-  let fblk = fpre;
-  let spre = xcur - xpre;
-  let scur = xcur - xpre;
-
-  for (let i = 0; i < maxiter; i++) {
-    if (fblk !== 0 && fcur !== 0 && (fpre > 0) !== (fcur > 0)) {
-      xblk = xpre;
-      fblk = fpre;
-      spre = xcur - xpre;
-      scur = xcur - xpre;
-    }
-    if (Math.abs(fblk) < Math.abs(fcur)) {
-      xpre = xcur;
-      xcur = xblk;
-      xblk = xpre;
-      fpre = fcur;
-      fcur = fblk;
-      fblk = fpre;
-    }
-
-    const delta = (xtol + 1e-12 * Math.abs(xcur)) / 2.0;
-    const sbis = (xblk - xcur) / 2.0;
-
-    if (fcur === 0 || Math.abs(sbis) < delta) {
-      return xcur;
-    }
-
-    if (Math.abs(spre) > delta && Math.abs(fcur) < Math.abs(fpre)) {
-      let stry: number;
-      if (xpre === xblk) {
-        stry = (-fcur * (xcur - xpre)) / (fcur - fpre);
-      } else {
-        const dpre = (fpre - fcur) / (xpre - xcur);
-        const dblk = (fblk - fcur) / (xblk - xcur);
-        stry = (-fcur * (fblk * dblk - fpre * dpre)) / (dblk * dpre * (fblk - fpre));
-      }
-      if (2.0 * Math.abs(stry) < Math.min(Math.abs(spre), 3.0 * Math.abs(sbis) - delta)) {
-        spre = scur;
-        scur = stry;
-      } else {
-        spre = sbis;
-        scur = sbis;
-      }
-    } else {
-      spre = sbis;
-      scur = sbis;
-    }
-
-    xpre = xcur;
-    fpre = fcur;
-    if (Math.abs(scur) > delta) {
-      xcur += scur;
-    } else {
-      xcur += sbis > 0 ? delta : -delta;
-    }
-    fcur = f(xcur);
-  }
-  return xcur;
-}
-
-/**
  * Computes nominal Total Dynamic Head (ft)
+ * TDH = SWL + Drawdown + (Discharge PSI * 2.31) + Friction Loss (Hf)
  */
 export function computeTDH(
   swl_ft: number,
@@ -253,102 +165,19 @@ export function computeTDH(
 }
 
 /**
- * Evaluates Engine B pump bowl head H(Q) = a*Q^2 + b*Q + c
+ * Decodes WGS84 decimal latitude and longitude directly from an 18-character
+ * California DWR site_code (e.g., "361737N1194798W003" -> { latitude: 36.1737, longitude: -119.4798 }).
  */
-export function evaluateBowlHeadFt(q_gpm: number, curve: PumpCurveCoefficients): number {
-  return Math.max(0, curve.head_a * q_gpm * q_gpm + curve.head_b * q_gpm + curve.head_c);
-}
-
-/**
- * Evaluates Engine B wire-to-water efficiency curve eta(Q) scaled to well's nominal OPE
- */
-export function evaluatePlantEfficiency(
-  q_gpm: number,
-  curve: PumpCurveCoefficients,
-  nominal_ope: number
-): number {
-  let raw_eta = curve.eff_a * q_gpm * q_gpm + curve.eff_b * q_gpm + curve.eff_c;
-  if (curve.eff_a < 0) {
-    const q_bep = -curve.eff_b / (2.0 * curve.eff_a);
-    const peak_poly = curve.eff_a * q_bep * q_bep + curve.eff_b * q_bep + curve.eff_c;
-    if (peak_poly > 0) {
-      raw_eta = raw_eta * (nominal_ope / peak_poly);
-    }
-  }
-  return Math.min(0.85, Math.max(0.15, raw_eta));
-}
-
-/**
- * Solves single interval via Engine B (Brentq non-linear operating point)
- */
-export function solveEngineBInterval(
-  kw_demand: number,
-  swl_ft: number,
-  well: WellProfile
-): { flow_gpm: number; tdh_ft: number; flag: string } {
-  const curve = well.pump_curve;
-  const base_lift_ft = computeTDH(
-    swl_ft,
-    well.drawdown_ft,
-    well.discharge_pressure_psi,
-    well.friction_loss_ft
-  );
-
-  if (kw_demand <= 0.05) {
-    return { flow_gpm: 0, tdh_ft: base_lift_ft, flag: 'ZERO_LOAD' };
-  }
-  if (kw_demand < well.min_operating_kw) {
-    return { flow_gpm: 0, tdh_ft: base_lift_ft, flag: 'SUB_IDLE_NO_LIFT' };
-  }
-  if (kw_demand > well.max_operating_kw) {
-    return { flow_gpm: 0, tdh_ft: base_lift_ft, flag: 'OVERLOAD_OR_DEADHEAD_FAULT' };
-  }
-  if (base_lift_ft >= curve.head_c * 1.35) {
-    return { flow_gpm: 0, tdh_ft: base_lift_ft, flag: 'SHUTOFF_HEAD_EXCEEDED_ZERO_FLOW' };
-  }
-
-  const effective_head_c = Math.max(curve.head_c, base_lift_ft * 1.38);
-  const adaptedCurve: PumpCurveCoefficients = {
-    ...curve,
-    head_c: effective_head_c,
-  };
-
-  const disc =
-    adaptedCurve.head_b * adaptedCurve.head_b -
-    4.0 * adaptedCurve.head_a * (adaptedCurve.head_c - base_lift_ft);
-  let q_upper = adaptedCurve.max_flow_gpm;
-  if (disc > 0 && adaptedCurve.head_a < 0) {
-    const q_hyd = (-adaptedCurve.head_b - Math.sqrt(disc)) / (2.0 * adaptedCurve.head_a);
-    q_upper = Math.min(adaptedCurve.max_flow_gpm, Math.max(50.0, q_hyd));
-  }
-
-  const q_lower = 1.0;
-  const reqKw = (q: number): { p_kw: number; tdh: number } => {
-    const h_bowl = evaluateBowlHeadFt(q, adaptedCurve);
-    const tdh = Math.max(base_lift_ft, h_bowl);
-    const eta = evaluatePlantEfficiency(q, adaptedCurve, well.ope);
-    const p_kw = (q * tdh) / (KW_GPM_TDH_CONSTANT * eta);
-    return { p_kw, tdh };
-  };
-
-  const f_low = reqKw(q_lower).p_kw - kw_demand;
-  const f_high = reqKw(q_upper).p_kw - kw_demand;
-
-  if (f_low >= 0) {
-    return { flow_gpm: 0, tdh_ft: base_lift_ft, flag: 'BELOW_MIN_BOWL_CURVE' };
-  }
-  if (f_high <= 0) {
-    const lim = reqKw(q_upper);
-    return { flow_gpm: q_upper, tdh_ft: lim.tdh, flag: 'CLAMPED_AT_HYDRAULIC_LIMIT' };
-  }
-
-  try {
-    const solved_q = brentqSolver((q) => reqKw(q).p_kw - kw_demand, q_lower, q_upper, 1e-3, 100);
-    const res = reqKw(solved_q);
-    return { flow_gpm: solved_q, tdh_ft: res.tdh, flag: 'BRENTQ_CONVERGED' };
-  } catch {
-    return { flow_gpm: 0, tdh_ft: base_lift_ft, flag: 'BRENTQ_NON_CONVERGENT' };
-  }
+export function decodeSiteCodeCoords(
+  siteCode: string
+): { latitude: number; longitude: number } | null {
+  const clean = siteCode.trim().toUpperCase();
+  const match = clean.match(/^(\d{6})N(\d{7})W\d{3}$/);
+  if (!match) return null;
+  const lat = parseInt(match[1], 10) / 10000.0;
+  const lon = -(parseInt(match[2], 10) / 10000.0);
+  if (lat < 32.0 || lat > 42.5 || lon < -125.0 || lon > -114.0) return null;
+  return { latitude: Number(lat.toFixed(4)), longitude: Number(lon.toFixed(4)) };
 }
 
 /**
@@ -380,6 +209,116 @@ export function splitCSVLine(line: string): string[] {
 }
 
 /**
+ * Parses a local or state-exported DWR CASGEM / CNRA Periodic Groundwater Level CSV file.
+ * Automatically decodes WGS84 coordinates from 18-character DWR site_code strings when
+ * explicit latitude/longitude columns are omitted.
+ */
+export function parseDWRCasgemCSV(csvText: string): DWRMonitoringRecord[] {
+  const lines = csvText
+    .replace(/^\uFEFF/, '')
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
+
+  if (lines.length < 2) {
+    throw new Error('DWR CASGEM CSV file must contain a header row and at least one measurement.');
+  }
+
+  const header = splitCSVLine(lines[0]).map((c) => c.toLowerCase());
+  const siteIdx = header.findIndex((c) =>
+    ['site_code', 'station_id', 'state_well_number', 'site code'].includes(c)
+  );
+  const dateIdx = header.findIndex((c) =>
+    ['measurement_date', 'msmt_date', 'date', 'read_date'].includes(c)
+  );
+  const dtwIdx = header.findIndex((c) =>
+    ['depth_to_water_ft', 'gwe_depth_ft', 'rp_to_ws_ft', 'gse_gwe', 'dtw_ft', 'depth_to_water'].includes(c)
+  );
+  const gseIdx = header.findIndex((c) =>
+    ['ground_surface_elevation_ft', 'gse_ft', 'wlm_gse', 'gse'].includes(c)
+  );
+  const qaIdx = header.findIndex((c) =>
+    ['quality_flag', 'wlm_qa_desc', 'qa_flag', 'quality'].includes(c)
+  );
+  const latIdx = header.findIndex((c) => ['latitude', 'lat'].includes(c));
+  const lonIdx = header.findIndex((c) => ['longitude', 'lon', 'lng'].includes(c));
+  const basinIdx = header.findIndex((c) =>
+    ['basin_name', 'subbasin_name', 'basin'].includes(c)
+  );
+  const methodIdx = header.findIndex((c) =>
+    ['measurement_method', 'wlm_mthd_desc', 'method'].includes(c)
+  );
+  const agencyIdx = header.findIndex((c) =>
+    ['monitoring_agency', 'coop_org_name', 'agency'].includes(c)
+  );
+
+  if (siteIdx === -1 || dateIdx === -1 || dtwIdx === -1) {
+    throw new Error(
+      'DWR CSV must include site_code, measurement_date (or msmt_date), and depth_to_water_ft (or gse_gwe).'
+    );
+  }
+
+  const records: DWRMonitoringRecord[] = [];
+  for (let i = 1; i < lines.length; i++) {
+    const row = splitCSVLine(lines[i]);
+    if (row.length <= Math.max(siteIdx, dateIdx, dtwIdx)) continue;
+
+    const siteCode = row[siteIdx].trim();
+    const rawDate = row[dateIdx].trim().slice(0, 10);
+    const dtw = parseFloat(row[dtwIdx]);
+    if (!siteCode || !rawDate || Number.isNaN(dtw) || dtw < 0) continue;
+
+    const gse = gseIdx >= 0 && row[gseIdx] ? parseFloat(row[gseIdx]) || 250.0 : 250.0;
+    const rawQa = qaIdx >= 0 && row[qaIdx] ? row[qaIdx].trim().toUpperCase() : 'GOOD';
+    const qualityFlag = ['GOOD', 'QUESTIONABLE', 'PROVISIONAL', 'MISSING', 'BAD', 'REJECTED'].includes(
+      rawQa
+    )
+      ? rawQa
+      : 'GOOD';
+
+    const decoded = decodeSiteCodeCoords(siteCode);
+    const lat =
+      latIdx >= 0 && row[latIdx] && !Number.isNaN(parseFloat(row[latIdx]))
+        ? parseFloat(row[latIdx])
+        : decoded?.latitude ?? 36.1737;
+    const lon =
+      lonIdx >= 0 && row[lonIdx] && !Number.isNaN(parseFloat(row[lonIdx]))
+        ? parseFloat(row[lonIdx])
+        : decoded?.longitude ?? -119.4798;
+
+    const basinName =
+      basinIdx >= 0 && row[basinIdx] ? row[basinIdx].trim() : 'San Joaquin Valley — Tulare Lake';
+    const measurementMethod =
+      methodIdx >= 0 && row[methodIdx]
+        ? row[methodIdx].trim()
+        : 'Electric sounder / pressure transducer';
+    const monitoringAgency =
+      agencyIdx >= 0 && row[agencyIdx]
+        ? row[agencyIdx].trim()
+        : 'California Department of Water Resources';
+
+    records.push({
+      site_code: siteCode,
+      measurement_date: rawDate,
+      depth_to_water_ft: Number(dtw.toFixed(2)),
+      ground_surface_elevation_ft: Number(gse.toFixed(2)),
+      quality_flag: qualityFlag,
+      latitude: lat,
+      longitude: lon,
+      basin_name: basinName,
+      measurement_method: measurementMethod,
+      monitoring_agency: monitoringAgency,
+    });
+  }
+
+  if (records.length === 0) {
+    throw new Error('No valid groundwater depth measurements found in DWR CSV.');
+  }
+
+  return records;
+}
+
+/**
  * Normalizes diverse PG&E date strings (YYYY-MM-DD, MM/DD/YYYY, M/D/YY, YYYY/MM/DD)
  * and time strings (24-hr or 12-hr AM/PM) into canonical YYYY-MM-DD, HH:MM, and epoch_ms.
  */
@@ -399,7 +338,6 @@ export function normalizePacificDateTime(
     }
   }
 
-  // If date column contains both date and time (e.g. "2026-04-04 04:00" or "4/4/2026 4:00 AM")
   if (!tPart && (dPart.includes(' ') || dPart.includes('T'))) {
     const sepIdx = dPart.includes('T') ? dPart.indexOf('T') : dPart.indexOf(' ');
     tPart = dPart.slice(sepIdx + 1).trim();
@@ -455,7 +393,6 @@ export function normalizePacificDateTime(
   }
 
   const pad2 = (n: number) => String(n).padStart(2, '0');
-  // Determine PST (-08:00) vs PDT (-07:00) roughly for California (March–November PDT)
   const tzOffset = month >= 3 && month <= 10 ? '-07:00' : '-08:00';
   const baseIso = `${year}-${pad2(month)}-${pad2(day)}T${pad2(hours)}:${pad2(minutes)}:00${tzOffset}`;
   let epochMs = Date.parse(baseIso);
@@ -631,7 +568,6 @@ export function parsePGEGreenButtonCSV(csvText: string): {
 
   tempRows.sort((a, b) => a.startEpoch - b.startEpoch);
 
-  // Infer interval duration step if end time is missing
   let defaultDurationHours = 0.25;
   if (tempRows.length >= 2) {
     const diffsSec: number[] = [];
@@ -686,7 +622,9 @@ export function parsePGEGreenButtonXML(xmlText: string): {
   }
 
   let multiplierToKwh = 0.001;
-  const powMatch = xmlText.match(/<(?:espi:)?powerOfTenMultiplier>\s*(-?\d+)\s*<\/(?:espi:)?powerOfTenMultiplier>/i);
+  const powMatch = xmlText.match(
+    /<(?:espi:)?powerOfTenMultiplier>\s*(-?\d+)\s*<\/(?:espi:)?powerOfTenMultiplier>/i
+  );
   if (powMatch) {
     const pow10 = parseInt(powMatch[1], 10);
     if (!Number.isNaN(pow10)) {
@@ -715,7 +653,6 @@ export function parsePGEGreenButtonXML(xmlText: string): {
       const kwh = Math.max(0, Number((rawVal * multiplierToKwh).toFixed(6)));
       const epochMs = startEpochSec * 1000;
 
-      // Convert epoch to Pacific Time (UTC-7 PDT for irrigation season)
       const pacDate = new Date(epochMs - 7 * 3600 * 1000);
       const y = pacDate.getUTCFullYear();
       const m = pad2(pacDate.getUTCMonth() + 1);
@@ -755,7 +692,11 @@ export function parsePGEDataFile(content: string): {
   intervals: RawEnergyInterval[];
 } {
   const trimmed = content.trim();
-  if (trimmed.startsWith('<?xml') || trimmed.includes('<feed') || trimmed.includes('IntervalReading')) {
+  if (
+    trimmed.startsWith('<?xml') ||
+    trimmed.includes('<feed') ||
+    trimmed.includes('IntervalReading')
+  ) {
     return parsePGEGreenButtonXML(trimmed);
   }
   return parsePGEGreenButtonCSV(trimmed);
@@ -830,9 +771,9 @@ export function matchAndInterpolateDWR(
     }
   }
 
-  const matchedRecords = (bySite.get(bestSite) || []).slice().sort((a, b) =>
-    a.measurement_date.localeCompare(b.measurement_date)
-  );
+  const matchedRecords = (bySite.get(bestSite) || [])
+    .slice()
+    .sort((a, b) => a.measurement_date.localeCompare(b.measurement_date));
 
   if (matchedRecords.length === 0) {
     return {
@@ -872,7 +813,8 @@ export function matchAndInterpolateDWR(
 }
 
 /**
- * Runs complete SGMA forensic audit pipeline (Engine A or Engine B + Anomaly Detection + GSA Summary)
+ * Runs complete SGMA forensic audit pipeline using Engine A (Standard Evidentiary Algebraic Ledger)
+ * + Forensic Anomaly Detection + GSA Reconciliation Summary.
  */
 export function runCompleteSGMAAudit(params: {
   well: WellProfile;
@@ -880,13 +822,12 @@ export function runCompleteSGMAAudit(params: {
   dwrCatalog: DWRMonitoringRecord[];
   landIqBilledAf: number;
   gsaPenaltyRatePerAf: number;
-  engineMode: 'ENGINE_A_ALGEBRAIC' | 'ENGINE_B_SCIPY_BRENTQ_NONLINEAR';
 }): {
   records: IntervalAuditRecord[];
   summary: GSAReconciliationSummary;
   matchedDwrRecords: DWRMonitoringRecord[];
 } {
-  const { well, rawIntervals, dwrCatalog, landIqBilledAf, gsaPenaltyRatePerAf, engineMode } = params;
+  const { well, rawIntervals, dwrCatalog, landIqBilledAf, gsaPenaltyRatePerAf } = params;
   const { matchedSiteCode, matchedRecords, swlVector } = matchAndInterpolateDWR(
     well,
     rawIntervals,
@@ -896,7 +837,7 @@ export function runCompleteSGMAAudit(params: {
   const n = rawIntervals.length;
   const bowlDepthFt = well.ope_test_metadata?.bowl_intake_depth_ft ?? 500.0;
 
-  // Step 1: Compute hydraulic state per interval
+  // Step 1: Compute Engine A hydraulic state per interval
   const tdhArr = new Array<number>(n);
   const kwhPerAfArr = new Array<number>(n);
   const rawAfArr = new Array<number>(n);
@@ -907,8 +848,6 @@ export function runCompleteSGMAAudit(params: {
   const solverFlags = new Array<string>(n);
   const durHoursArr = new Array<number>(n);
 
-  const brentCache = new Map<string, { flow_gpm: number; tdh_ft: number; flag: string }>();
-
   for (let i = 0; i < n; i++) {
     const kwh = rawIntervals[i].kwh;
     const durHrs =
@@ -917,51 +856,26 @@ export function runCompleteSGMAAudit(params: {
         : 0.25;
     durHoursArr[i] = durHrs;
     const durMinutes = durHrs * 60.0;
-    const kw = rawIntervals[i].kw_demand;
     const swl = swlVector[i];
 
-    if (engineMode === 'ENGINE_A_ALGEBRAIC') {
-      const tdh = computeTDH(swl, well.drawdown_ft, well.discharge_pressure_psi, well.friction_loss_ft);
-      const safeTdh = Math.max(tdh, 1.0);
-      const kwhPerAf = (HYDRAULIC_KWH_CONSTANT * safeTdh) / well.ope;
-      const kwhPerAfT1 = (HYDRAULIC_KWH_CONSTANT * safeTdh) / TIER1_MANUFACTURER_OPE;
-      const kwhPerAfT2 = (HYDRAULIC_KWH_CONSTANT * safeTdh) / TIER2_REGIONAL_OPE;
+    const tdh = computeTDH(swl, well.drawdown_ft, well.discharge_pressure_psi, well.friction_loss_ft);
+    const safeTdh = Math.max(tdh, 1.0);
+    const kwhPerAf = (HYDRAULIC_KWH_CONSTANT * safeTdh) / well.ope;
+    const kwhPerAfT1 = (HYDRAULIC_KWH_CONSTANT * safeTdh) / TIER1_MANUFACTURER_OPE;
+    const kwhPerAfT2 = (HYDRAULIC_KWH_CONSTANT * safeTdh) / TIER2_REGIONAL_OPE;
 
-      const af = kwh > 0 ? kwh / kwhPerAf : 0;
-      const afT1 = kwh > 0 ? kwh / kwhPerAfT1 : 0;
-      const afT2 = kwh > 0 ? kwh / kwhPerAfT2 : 0;
+    const af = kwh > 0 ? kwh / kwhPerAf : 0;
+    const afT1 = kwh > 0 ? kwh / kwhPerAfT1 : 0;
+    const afT2 = kwh > 0 ? kwh / kwhPerAfT2 : 0;
 
-      tdhArr[i] = Number(tdh.toFixed(2));
-      kwhPerAfArr[i] = Number(kwhPerAf.toFixed(3));
-      rawAfArr[i] = af;
-      gallonsArr[i] = af * GALLONS_PER_ACRE_FOOT;
-      flowGpmArr[i] = kwh > 0 ? (af * GALLONS_PER_ACRE_FOOT) / durMinutes : 0;
-      afMinArr[i] = Math.min(afT2, af, afT1);
-      afMaxArr[i] = Math.max(afT1, af, afT2);
-      solverFlags[i] = kwh > 0 ? 'ALGEBRAIC_OK' : 'ZERO_LOAD';
-    } else {
-      const key = `${kw.toFixed(2)}_${swl.toFixed(1)}`;
-      let solved = brentCache.get(key);
-      if (!solved) {
-        solved = solveEngineBInterval(kw, swl, well);
-        brentCache.set(key, solved);
-      }
-      const gal = solved.flow_gpm * durMinutes;
-      const af = gal / GALLONS_PER_ACRE_FOOT;
-      const safeTdh = Math.max(solved.tdh_ft, 1.0);
-      const kwhPerAf = (HYDRAULIC_KWH_CONSTANT * safeTdh) / well.ope;
-
-      tdhArr[i] = Number(solved.tdh_ft.toFixed(2));
-      kwhPerAfArr[i] = Number(kwhPerAf.toFixed(3));
-      rawAfArr[i] = af;
-      gallonsArr[i] = gal;
-      flowGpmArr[i] = solved.flow_gpm;
-      const afT2 = af * (TIER2_REGIONAL_OPE / well.ope);
-      const afT1 = af * (TIER1_MANUFACTURER_OPE / well.ope);
-      afMinArr[i] = Math.min(afT2, af, afT1);
-      afMaxArr[i] = Math.max(afT1, af, afT2);
-      solverFlags[i] = solved.flag;
-    }
+    tdhArr[i] = Number(tdh.toFixed(2));
+    kwhPerAfArr[i] = Number(kwhPerAf.toFixed(3));
+    rawAfArr[i] = af;
+    gallonsArr[i] = af * GALLONS_PER_ACRE_FOOT;
+    flowGpmArr[i] = kwh > 0 ? (af * GALLONS_PER_ACRE_FOOT) / durMinutes : 0;
+    afMinArr[i] = Math.min(afT2, af, afT1);
+    afMaxArr[i] = Math.max(afT1, af, afT2);
+    solverFlags[i] = kwh > 0 ? 'ALGEBRAIC_OK' : 'ZERO_LOAD';
   }
 
   // Step 2: Forensic Anomaly Filter
@@ -972,11 +886,7 @@ export function runCompleteSGMAAudit(params: {
       (r.kw_demand < well.min_operating_kw || swlVector[idx] + well.drawdown_ft >= bowlDepthFt)
   );
   const isDeadhead = rawIntervals.map(
-    (r, idx) =>
-      isEnergized[idx] &&
-      (r.kw_demand > well.max_operating_kw ||
-        solverFlags[idx] === 'SHUTOFF_HEAD_EXCEEDED_ZERO_FLOW' ||
-        solverFlags[idx] === 'OVERLOAD_OR_DEADHEAD_FAULT')
+    (r, idx) => isEnergized[idx] && r.kw_demand > well.max_operating_kw
   );
   const normalCandidate = rawIntervals.map(
     (_, idx) => isEnergized[idx] && !isBrokenSuction[idx] && !isDeadhead[idx]
@@ -1170,6 +1080,11 @@ export function runCompleteSGMAAudit(params: {
     totalAfRounded > 0 ? Number(((netDiscrepancyAf / totalAfRounded) * 100.0).toFixed(1)) : 0;
   const dollarVariance = Number((Math.max(0, netDiscrepancyAf) * gsaPenaltyRatePerAf).toFixed(2));
 
+  const primaryAgency =
+    matchedRecords[0]?.monitoring_agency ?? 'California Department of Water Resources';
+  const primaryMethod =
+    matchedRecords[0]?.measurement_method ?? 'Electric sounder / electronic pressure transducer';
+
   const summary: GSAReconciliationSummary = {
     client_id: well.client_id,
     apn: well.apn,
@@ -1178,7 +1093,7 @@ export function runCompleteSGMAAudit(params: {
     gsa_name: well.gsa_name,
     audit_period_start: records[0]?.interval_start ?? '2026-04-04 04:00 PDT',
     audit_period_end: records[records.length - 1]?.interval_end ?? '2026-10-17 13:00 PDT',
-    engine_mode: engineMode,
+    engine_mode: 'ENGINE_A_ALGEBRAIC_LEDGER',
     total_kwh_consumed: Number(totalKwh.toFixed(2)),
     total_af_pumped: totalAfRounded,
     uncertainty_bracket_total: {
@@ -1197,6 +1112,8 @@ export function runCompleteSGMAAudit(params: {
     dollar_variance: dollarVariance,
     evidentiary_confidence_tier: well.efficiency_source,
     dwr_monitoring_site_used: matchedSiteCode,
+    dwr_monitoring_agency: primaryAgency,
+    dwr_measurement_method: primaryMethod,
     monthly_breakdown: monthlyBreakdown,
   };
 

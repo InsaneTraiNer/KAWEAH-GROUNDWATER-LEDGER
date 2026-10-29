@@ -11,13 +11,12 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from enum import Enum
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional
 
 try:
     from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 except ImportError:
     from _compat import BaseModel, ConfigDict, Field, field_validator, model_validator  # type: ignore
-
 
 
 class EfficiencySource(str, Enum):
@@ -28,52 +27,11 @@ class EfficiencySource(str, Enum):
 
 
 class IntervalStatus(str, Enum):
-    """Forensic operational status assigned to each 15-minute interval."""
+    """Forensic operational status assigned to each metered interval."""
     NORMAL = "NORMAL"
     SUSPECT_SUCTION_LOSS_OR_IDLE = "SUSPECT_SUCTION_LOSS_OR_IDLE"
     OVERLOAD_OR_DEADHEAD = "OVERLOAD_OR_DEADHEAD"
     INTERMITTENT_CYCLING = "INTERMITTENT_CYCLING"
-
-
-class PumpCurveCoefficients(BaseModel):
-    """
-    Polynomial coefficients for Engine B Dynamic Non-Linear Operating Point Solver.
-    Bowl Head Curve: H(Q) = a * Q^2 + b * Q + c (where Q is in GPM, H in feet)
-    OPE Curve: eta(Q) = d * Q^2 + e * Q + f (clipped to [0.10, 0.88])
-    System Friction Curve coefficient: k_sys * Q^2 (where Q is in GPM)
-    """
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    head_a: float = Field(
-        default=-4.85e-5,
-        description="Quadratic coefficient 'a' in H(Q) = a*Q^2 + b*Q + c (ft/GPM^2), must be negative for stable curve",
-    )
-    head_b: float = Field(
-        default=-0.012,
-        description="Linear coefficient 'b' in H(Q) = a*Q^2 + b*Q + c (ft/GPM)",
-    )
-    head_c: float = Field(
-        default=345.0,
-        description="Shutoff head 'c' at Q=0 in H(Q) = a*Q^2 + b*Q + c (ft)",
-        gt=0.0,
-    )
-    eff_a: float = Field(
-        default=-5.20e-7,
-        description="Quadratic coefficient in eta(Q) = eff_a*Q^2 + eff_b*Q + eff_c",
-    )
-    eff_b: float = Field(
-        default=0.00118,
-        description="Linear coefficient in eta(Q) = eff_a*Q^2 + eff_b*Q + eff_c",
-    )
-    eff_c: float = Field(
-        default=0.05,
-        description="Intercept in eta(Q) = eff_a*Q^2 + eff_b*Q + eff_c",
-    )
-    max_flow_gpm: float = Field(
-        default=2200.0,
-        description="Maximum physical runout flow rate of the pump bowls (GPM)",
-        gt=100.0,
-    )
 
 
 class OPETestMetadata(BaseModel):
@@ -129,13 +87,13 @@ class WellProfile(BaseModel):
     )
     meter_id: str = Field(..., min_length=2, description="PG&E Revenue-Grade SmartMeter Badge ID")
     latitude: float = Field(
-        default=36.2077,
+        default=36.1737,
         ge=32.0,
         le=42.0,
         description="Wellhead latitude (NAD83 / WGS84) within California",
     )
     longitude: float = Field(
-        default=-119.3473,
+        default=-119.4798,
         ge=-125.0,
         le=-114.0,
         description="Wellhead longitude (NAD83 / WGS84) within California",
@@ -188,10 +146,6 @@ class WellProfile(BaseModel):
         gt=0.0,
         description="Maximum plausible electrical load (kW) before overload or closed-valve deadhead fault",
     )
-    pump_curve: Optional[PumpCurveCoefficients] = Field(
-        default_factory=PumpCurveCoefficients,
-        description="Non-linear bowl polynomial coefficients for Engine B solver",
-    )
 
     @model_validator(mode="after")
     def validate_kw_bounds_and_apet(self) -> "WellProfile":
@@ -229,42 +183,52 @@ class WellProfile(BaseModel):
 
 class DWRMonitoringRecord(BaseModel):
     """
-    California Department of Water Resources (DWR) CASGEM / Periodic Groundwater
-    Level measurement record from data.cnra.ca.gov.
+    California Department of Water Resources (DWR) CASGEM / Continuous & Periodic
+    Groundwater Level measurement record from data.cnra.ca.gov (Resource bfa9f262-24a1-45bd-8dc8-138bc8107266).
+    Admissible under California Evidence Code § 1280 (Official Public Records) and
+    § 1220 (Party Admission when co-monitored by the jurisdictional GSA).
     """
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     site_code: str = Field(
         ...,
         min_length=5,
-        description="18-character DWR Site Code or State Well Number (e.g., 362077N1193473W001)",
+        description="18-character DWR Site Code (e.g., 361737N1194798W003)",
     )
-    measurement_date: date = Field(..., description="Date of physical depth-to-water sounding")
+    measurement_date: date = Field(..., description="Date of physical or transducer depth-to-water sounding")
     depth_to_water_ft: float = Field(
         ...,
         ge=0.0,
         le=2000.0,
-        description="Measured groundwater depth below reference point / ground surface (ft)",
+        description="Measured groundwater depth below ground surface (gse_gwe in ft)",
     )
     ground_surface_elevation_ft: float = Field(
         ...,
         ge=-280.0,
         le=10000.0,
-        description="Ground Surface Elevation (GSE) above NAVD88 datum (ft)",
+        description="Ground Surface Elevation (wlm_gse) above NAVD88 datum (ft)",
     )
     quality_flag: str = Field(
-        default="GOOD",
-        description="DWR measurement quality flag (e.g., GOOD, QUESTIONABLE, PUMPING_NEARBY)",
+        default="Good",
+        description="DWR measurement quality flag (wlm_qa_desc: Good, Provisional, Questionable)",
     )
-    latitude: Optional[float] = Field(default=None, description="Monitoring well latitude")
-    longitude: Optional[float] = Field(default=None, description="Monitoring well longitude")
+    measurement_method: str = Field(
+        default="Electronic pressure transducer",
+        description="DWR measurement instrument (wlm_mthd_desc: Electronic pressure transducer, Electric sounder measurement, Steel tape measurement)",
+    )
+    monitoring_agency: str = Field(
+        default="Department of Water Resources",
+        description="Cooperating monitoring agency (coop_org_name: Department of Water Resources, Mid-Kaweah GSA, Lower Tule River Irrigation District GSA, etc.)",
+    )
+    latitude: Optional[float] = Field(default=None, description="Monitoring well latitude (WGS84)")
+    longitude: Optional[float] = Field(default=None, description="Monitoring well longitude (WGS84)")
     basin_name: Optional[str] = Field(default=None, description="DWR Bulletin 118 Subbasin")
 
 
 class UncertaintyBracket(BaseModel):
     """
     Three-tier evidentiary extraction bracket (Acre-Feet) for a single interval or aggregate period:
-    - af_min: Lower bound extraction assuming Regional Baseline OPE (0.53) or conservative high TDH
+    - af_min: Lower bound extraction assuming Regional Baseline OPE (0.53)
     - af_expected: Primary certified ledger extraction at verified OPE (e.g., APET)
     - af_max: Upper bound physical ceiling assuming new Manufacturer Default OPE (0.68)
     """
@@ -276,8 +240,6 @@ class UncertaintyBracket(BaseModel):
 
     @model_validator(mode="after")
     def check_ordering(self) -> "UncertaintyBracket":
-        # Note: If certified APET OPE exceeds 0.68 or falls below 0.53, af_min and af_max
-        # are ordered so af_min <= af_expected <= af_max always holds mathematically.
         if not (self.af_min - 1e-9 <= self.af_expected <= self.af_max + 1e-9):
             raise ValueError(
                 f"Uncertainty bracket out of order: min={self.af_min}, "
@@ -288,14 +250,14 @@ class UncertaintyBracket(BaseModel):
 
 class IntervalAuditRecord(BaseModel):
     """
-    Forensic audit record for a single 15-minute PG&E SmartMeter interval.
+    Forensic audit record for a single PG&E SmartMeter interval.
     """
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     interval_start: datetime = Field(..., description="Timezone-aware start timestamp (America/Los_Angeles)")
     interval_end: datetime = Field(..., description="Timezone-aware end timestamp (America/Los_Angeles)")
-    kwh: float = Field(..., ge=0.0, description="Metered energy consumption in 15-minute window (kWh)")
-    kw_demand: float = Field(..., ge=0.0, description="Average real power demand over 15-minute window (kW = kWh * 4)")
+    kwh: float = Field(..., ge=0.0, description="Metered energy consumption in interval window (kWh)")
+    kw_demand: float = Field(..., ge=0.0, description="Average real power demand over interval window (kW)")
     interpolated_swl_ft: float = Field(..., ge=0.0, description="Seasonally interpolated DWR static water level (ft)")
     tdh_ft: float = Field(..., ge=0.0, description="Calculated Total Dynamic Head for interval (ft)")
     kwh_per_af: float = Field(..., gt=0.0, description="Specific energy factor (kWh required per Acre-Foot lifted)")
@@ -334,7 +296,7 @@ class MonthlyExtractionSummary(BaseModel):
 class GSAReconciliationSummary(BaseModel):
     """
     Final legal & financial reconciliation summary contrasting GSA remote-sensing ET
-    assessments (Land IQ) against the audited physical hydraulic ledger.
+    assessments (Land IQ) against the audited physical hydraulic ledger (Engine A).
     """
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -345,7 +307,10 @@ class GSAReconciliationSummary(BaseModel):
     gsa_name: str
     audit_period_start: datetime
     audit_period_end: datetime
-    engine_mode: str = Field(default="ENGINE_A_ALGEBRAIC", description="Hydraulic solver used")
+    engine_mode: str = Field(
+        default="ENGINE_A_ALGEBRAIC_LEDGER",
+        description="Standard Evidentiary Efficiency-Lift Algebraic Hydraulic Engine",
+    )
     total_kwh_consumed: float = Field(..., ge=0.0)
     total_af_pumped: float = Field(..., ge=0.0, description="Audited net groundwater extraction (AF)")
     uncertainty_bracket_total: UncertaintyBracket = Field(
@@ -371,11 +336,19 @@ class GSAReconciliationSummary(BaseModel):
     )
     dollar_variance: float = Field(
         ...,
-        description="Contested financial penalty savings ($ = net_discrepancy_af * gsa_penalty_rate_per_af)",
+        description="Contested financial penalty savings ($ = max(0, net_discrepancy_af) * gsa_penalty_rate_per_af)",
     )
     evidentiary_confidence_tier: EfficiencySource
     dwr_monitoring_site_used: str = Field(
-        default="362077N1193473W001",
-        description="Matched DWR CASGEM site code used for seasonal SWL interpolation",
+        default="361737N1194798W003",
+        description="Matched official DWR CASGEM / SGMA Data Viewer 18-character site code",
+    )
+    dwr_monitoring_agency: str = Field(
+        default="Department of Water Resources / Mid-Kaweah GSA",
+        description="Official cooperating monitoring agency for the matched DWR station",
+    )
+    dwr_measurement_method: str = Field(
+        default="Electronic pressure transducer & Electric sounder measurement",
+        description="Physical measurement instrumentation recorded in DWR database",
     )
     monthly_breakdown: List[MonthlyExtractionSummary] = Field(default_factory=list)

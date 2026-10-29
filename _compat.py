@@ -2,10 +2,9 @@
 SGMA Extraction Auditor & Water Ledger Engine
 Module: _compat.py
 
-Hermetic runtime compatibility layer providing full Pydantic v2 validation semantics,
-NumPy vectorized array operations (including piecewise linear `interp` and `convolve`),
-and Richard Brent's `brentq` non-linear root-finding solver when running in bare Python
-environments where third-party C wheels are not pre-installed.
+Hermetic runtime compatibility layer providing full Pydantic v2 validation semantics
+and NumPy vectorized array operations (including piecewise linear `interp` and `convolve`)
+when running in bare Python environments where third-party C wheels are not pre-installed.
 """
 
 from __future__ import annotations
@@ -19,88 +18,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tupl
 
 
 # =============================================================================
-# 1. RICHARD BRENT'S ROOT-FINDING ALGORITHM (scipy.optimize.brentq equivalent)
-# =============================================================================
-
-def brentq_fallback(
-    f: Callable[[float], float],
-    a: float,
-    b: float,
-    xtol: float = 2e-12,
-    rtol: float = 8.881784197001252e-16,
-    maxiter: int = 100,
-) -> float:
-    """
-    Exact IEEE-754 implementation of Richard Brent's (1973) root-finding algorithm
-    combining bisection, secant, and inverse quadratic interpolation on [a, b].
-    Matches `scipy.optimize.brentq` semantics and convergence guarantees.
-    """
-    xpre = float(a)
-    xcur = float(b)
-    fpre = float(f(xpre))
-    fcur = float(f(xcur))
-
-    if fpre * fcur > 0.0:
-        raise ValueError(f"f(a) and f(b) must have different signs: f({a})={fpre}, f({b})={fcur}")
-    if fpre == 0.0:
-        return xpre
-    if fcur == 0.0:
-        return xcur
-
-    xblk = xpre
-    fblk = fpre
-    spre = scur = xcur - xpre
-
-    for _ in range(maxiter):
-        if fblk != 0.0 and fcur != 0.0 and ((fpre > 0) != (fcur > 0)):
-            xblk = xpre
-            fblk = fpre
-            spre = scur = xcur - xpre
-
-        if abs(fblk) < abs(fcur):
-            xpre, xcur, xblk = xcur, xblk, xcur
-            fpre, fcur, fblk = fcur, fblk, fcur
-
-        delta = (xtol + rtol * abs(xcur)) / 2.0
-        sbis = (xblk - xcur) / 2.0
-
-        if fcur == 0.0 or abs(sbis) < delta:
-            return xcur
-
-        if abs(spre) > delta and abs(fcur) < abs(fpre):
-            if xpre == xblk:
-                # Secant step
-                stry = -fcur * (xcur - xpre) / (fcur - fpre)
-            else:
-                # Inverse quadratic interpolation step
-                dpre = (fpre - fcur) / (xpre - xcur)
-                dblk = (fblk - fcur) / (xblk - xcur)
-                stry = -fcur * (fblk * dblk - fpre * dpre) / (dblk * dpre * (fblk - fpre))
-
-            if 2.0 * abs(stry) < min(abs(spre), 3.0 * abs(sbis) - delta):
-                spre = scur
-                scur = stry
-            else:
-                spre = sbis
-                scur = sbis
-        else:
-            spre = sbis
-            scur = sbis
-
-        xpre = xcur
-        fpre = fcur
-        if abs(scur) > delta:
-            xcur += scur
-        else:
-            xcur += delta if sbis > 0 else -delta
-
-        fcur = float(f(xcur))
-
-    raise RuntimeError(f"brentq failed to converge within {maxiter} iterations.")
-
-
-# =============================================================================
-# 2. VECTORIZED NUMPY SHIM (when numpy C-extension is unavailable)
+# 1. VECTORIZED NUMPY SHIM (when numpy C-extension is unavailable)
 # =============================================================================
 
 class VectorArray:

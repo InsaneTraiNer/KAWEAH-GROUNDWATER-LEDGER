@@ -11,8 +11,10 @@ import {
 } from './data/subbasinPresets';
 import {
   computeTDH,
+  DWRMonitoringRecord,
   EfficiencySource,
   inferPlausibleKwBounds,
+  parseDWRCasgemCSV,
   parsePGEDataFile,
   RawEnergyInterval,
   runCompleteSGMAAudit,
@@ -33,9 +35,6 @@ export default function App() {
   const [gsaPenaltyRatePerAf, setGsaPenaltyRatePerAf] = useState<number>(
     SUBBASIN_PRESETS[0].gsaPenaltyRatePerAf
   );
-  const [engineMode, setEngineMode] = useState<
-    'ENGINE_A_ALGEBRAIC' | 'ENGINE_B_SCIPY_BRENTQ_NONLINEAR'
-  >('ENGINE_A_ALGEBRAIC');
 
   // Draft string states for numeric inputs so typing/backspacing never hijacks keystrokes
   const [psiDraft, setPsiDraft] = useState<string>(
@@ -65,17 +64,31 @@ export default function App() {
   const [csvUploadStatus, setCsvUploadStatus] = useState<string | null>(null);
   const [csvError, setCsvError] = useState<string | null>(null);
 
+  const [customDwrCatalog, setCustomDwrCatalog] = useState<DWRMonitoringRecord[] | null>(null);
+  const [dwrUploadStatus, setDwrUploadStatus] = useState<string | null>(null);
+  const [dwrError, setDwrError] = useState<string | null>(null);
+
   const activeIntervals = customIntervals ?? defaultIntervals;
+  const activeDwrCatalog = customDwrCatalog ?? DWR_CASGEM_CATALOG;
 
   // Sanitize well parameters for engine execution even while user is mid-keystroke
   const sanitizedWell = useMemo<WellProfile>(() => {
-    const safeMinKw = Math.max(1, Number.isFinite(well.min_operating_kw) ? well.min_operating_kw : 10);
+    const safeMinKw = Math.max(
+      1,
+      Number.isFinite(well.min_operating_kw) ? well.min_operating_kw : 10
+    );
     const safeMaxKw = Math.max(
       safeMinKw + 5,
       Number.isFinite(well.max_operating_kw) ? well.max_operating_kw : safeMinKw + 40
     );
-    const safePsi = Math.max(0, Number.isFinite(well.discharge_pressure_psi) ? well.discharge_pressure_psi : 0);
-    const safeFriction = Math.max(0, Number.isFinite(well.friction_loss_ft) ? well.friction_loss_ft : 0);
+    const safePsi = Math.max(
+      0,
+      Number.isFinite(well.discharge_pressure_psi) ? well.discharge_pressure_psi : 0
+    );
+    const safeFriction = Math.max(
+      0,
+      Number.isFinite(well.friction_loss_ft) ? well.friction_loss_ft : 0
+    );
     const safeOpe = Math.min(0.85, Math.max(0.2, Number.isFinite(well.ope) ? well.ope : 0.6));
     return {
       ...well,
@@ -91,14 +104,16 @@ export default function App() {
     return runCompleteSGMAAudit({
       well: sanitizedWell,
       rawIntervals: activeIntervals,
-      dwrCatalog: DWR_CASGEM_CATALOG,
+      dwrCatalog: activeDwrCatalog,
       landIqBilledAf: Math.max(0, Number.isFinite(landIqBilledAf) ? landIqBilledAf : 0),
-      gsaPenaltyRatePerAf: Math.max(0, Number.isFinite(gsaPenaltyRatePerAf) ? gsaPenaltyRatePerAf : 0),
-      engineMode,
+      gsaPenaltyRatePerAf: Math.max(
+        0,
+        Number.isFinite(gsaPenaltyRatePerAf) ? gsaPenaltyRatePerAf : 0
+      ),
     });
-  }, [sanitizedWell, activeIntervals, landIqBilledAf, gsaPenaltyRatePerAf, engineMode]);
+  }, [sanitizedWell, activeIntervals, activeDwrCatalog, landIqBilledAf, gsaPenaltyRatePerAf]);
 
-  const { records, summary } = auditResult;
+  const { records, summary, matchedDwrRecords } = auditResult;
 
   const nominalTdh = computeTDH(
     sanitizedWell.static_depth_to_water_ft,
@@ -127,13 +142,13 @@ export default function App() {
       ope_test_metadata: found.well.ope_test_metadata
         ? { ...found.well.ope_test_metadata }
         : undefined,
-      pump_curve: { ...found.well.pump_curve },
     };
     setWell(nextWell);
     setLandIqBilledAf(found.landIqBilledAf);
     setGsaPenaltyRatePerAf(found.gsaPenaltyRatePerAf);
     syncDraftsFromWell(nextWell, found.landIqBilledAf, found.gsaPenaltyRatePerAf);
     setCsvError(null);
+    setDwrError(null);
   };
 
   const handleAutoFitKwEnvelope = (targetIntervals: RawEnergyInterval[] = activeIntervals) => {
@@ -221,7 +236,29 @@ export default function App() {
       }
     };
     reader.readAsText(file);
-    // Reset input value so re-uploading the exact same file triggers onChange
+    e.target.value = '';
+  };
+
+  const handleDWRFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const fileName = file.name;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try {
+        const text = String(ev.target?.result || '');
+        const parsedRecords = parseDWRCasgemCSV(text);
+        setCustomDwrCatalog(parsedRecords);
+        const uniqueSites = Array.from(new Set(parsedRecords.map((r) => r.site_code)));
+        setDwrUploadStatus(
+          `Loaded ${parsedRecords.length} DWR soundings (${uniqueSites.join(', ')}) from ${fileName}`
+        );
+        setDwrError(null);
+      } catch (err) {
+        setDwrError(err instanceof Error ? err.message : 'Invalid DWR CASGEM CSV format.');
+      }
+    };
+    reader.readAsText(file);
     e.target.value = '';
   };
 
@@ -356,7 +393,7 @@ export default function App() {
               Well &amp; Subbasin Calibration
             </h1>
             <p className="text-xs text-slate-500 mt-0.5">
-              Deterministic Tulare Lake Basin SGMA Water Ledger
+              Engine A Algebraic Ledger · Official DWR &amp; GSA Telemetry
             </p>
           </div>
 
@@ -459,34 +496,16 @@ export default function App() {
             </div>
           </div>
 
-          {/* Hydraulic Engine Selector */}
-          <div className="pt-2 border-t border-slate-200">
-            <span className="block text-xs font-medium text-slate-700 mb-1.5">
-              Hydraulic Calculation Engine
-            </span>
-            <div className="grid grid-cols-2 gap-1 p-1 bg-slate-100 rounded">
-              <button
-                type="button"
-                onClick={() => setEngineMode('ENGINE_A_ALGEBRAIC')}
-                className={`px-2 py-1.5 text-[11.5px] font-medium rounded transition-colors whitespace-nowrap ${
-                  engineMode === 'ENGINE_A_ALGEBRAIC'
-                    ? 'bg-white text-slate-900 shadow-xs'
-                    : 'text-slate-600 hover:text-slate-900'
-                }`}
-              >
-                Engine A: Algebraic
-              </button>
-              <button
-                type="button"
-                onClick={() => setEngineMode('ENGINE_B_SCIPY_BRENTQ_NONLINEAR')}
-                className={`px-2 py-1.5 text-[11.5px] font-medium rounded transition-colors whitespace-nowrap ${
-                  engineMode === 'ENGINE_B_SCIPY_BRENTQ_NONLINEAR'
-                    ? 'bg-white text-slate-900 shadow-xs'
-                    : 'text-slate-600 hover:text-slate-900'
-                }`}
-              >
-                Engine B: Brentq
-              </button>
+          {/* Official DWR Groundwater Station Summary */}
+          <div className="pt-2 border-t border-slate-200 space-y-1">
+            <div className="flex items-center justify-between text-xs">
+              <span className="font-semibold text-slate-800">Matched DWR / GSA Station</span>
+              <span className="font-mono text-sky-700 font-semibold">
+                {summary.dwr_monitoring_site_used}
+              </span>
+            </div>
+            <div className="text-[11px] text-slate-600 leading-snug">
+              {summary.dwr_monitoring_agency} · {summary.dwr_measurement_method} ({matchedDwrRecords.length} soundings)
             </div>
           </div>
 
@@ -921,6 +940,33 @@ export default function App() {
             )}
           </div>
 
+          {/* Custom DWR CASGEM CSV Upload */}
+          <div className="space-y-2 pt-3 border-t border-slate-200">
+            <label
+              htmlFor="dwr-csv-upload"
+              className="block text-xs font-semibold text-slate-800"
+            >
+              Ingest DWR CASGEM Groundwater CSV (Optional)
+            </label>
+            <input
+              id="dwr-csv-upload"
+              type="file"
+              accept=".csv,.txt"
+              onChange={handleDWRFileUpload}
+              className="block w-full text-xs text-slate-600 file:mr-2 file:py-1.5 file:px-3 file:rounded file:border-0 file:text-xs file:font-medium file:bg-slate-100 file:text-slate-800 hover:file:bg-slate-200"
+            />
+            {dwrUploadStatus && (
+              <div className="text-[11px] text-emerald-700 font-mono">
+                {dwrUploadStatus}
+              </div>
+            )}
+            {dwrError && (
+              <div role="alert" className="text-[11px] text-rose-700 font-medium">
+                {dwrError}
+              </div>
+            )}
+          </div>
+
           <div className="pt-2 border-t border-slate-200 flex items-center justify-between gap-2">
             <button
               type="button"
@@ -928,6 +974,8 @@ export default function App() {
                 handleSelectPreset(selectedPresetId);
                 setCustomIntervals(null);
                 setCsvUploadStatus(null);
+                setCustomDwrCatalog(null);
+                setDwrUploadStatus(null);
               }}
               className="w-full py-2 px-3 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded transition-colors"
             >
@@ -1048,7 +1096,11 @@ export default function App() {
           {/* Dynamic Workspace View */}
           {activeView === 'workspace' && (
             <>
-              <HydraulicCharts well={sanitizedWell} summary={summary} />
+              <HydraulicCharts
+                well={sanitizedWell}
+                summary={summary}
+                matchedDwrRecords={matchedDwrRecords}
+              />
               <IntervalLedgerTable
                 records={records}
                 brokenSuctionCount={summary.broken_suction_intervals}
@@ -1067,7 +1119,6 @@ export default function App() {
             <PythonRepositoryView
               landIqAf={landIqBilledAf}
               gsaPenaltyRate={gsaPenaltyRatePerAf}
-              engineMode={engineMode}
             />
           )}
         </main>

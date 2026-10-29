@@ -46,8 +46,10 @@ class AuditReportGenerator:
         audit_batch: ForensicAuditBatch,
         land_iq_billed_af: float,
         gsa_penalty_rate_per_af: float,
-        dwr_site_code: str = "362077N1193473W001",
-        engine_mode: str = "ENGINE_A_ALGEBRAIC",
+        dwr_site_code: str = "361737N1194798W003",
+        dwr_monitoring_agency: str = "Department of Water Resources / Mid-Kaweah GSA",
+        dwr_measurement_method: str = "Electronic pressure transducer & Electric sounder measurement",
+        engine_mode: str = "ENGINE_A_ALGEBRAIC_LEDGER",
     ) -> GSAReconciliationSummary:
         """
         Aggregates 15-minute `IntervalAuditRecord` items into monthly summaries and
@@ -153,6 +155,8 @@ class AuditReportGenerator:
             dollar_variance=dollar_variance,
             evidentiary_confidence_tier=well.efficiency_source,
             dwr_monitoring_site_used=dwr_site_code,
+            dwr_monitoring_agency=dwr_monitoring_agency,
+            dwr_measurement_method=dwr_measurement_method,
             monthly_breakdown=monthly_summaries,
         )
 
@@ -189,7 +193,7 @@ class AuditReportGenerator:
 **Assessor Parcel Number (APN):** `{summary.apn}`  
 **Well Identifier:** `{summary.well_id}` | **PG&E Service Agreement ID:** `{well.service_agreement_id}` | **Meter ID:** `{well.meter_id}`  
 **Audit Period:** {summary.audit_period_start.strftime('%Y-%m-%d %H:%M %Z')} to {summary.audit_period_end.strftime('%Y-%m-%d %H:%M %Z')}  
-**Hydraulic Solver Engine:** `{summary.engine_mode}` | **DWR CASGEM Reference Station:** `{summary.dwr_monitoring_site_used}`  
+**Hydraulic Solver Engine:** `{summary.engine_mode}` | **DWR CASGEM Reference Station:** `{summary.dwr_monitoring_site_used}` ({summary.dwr_monitoring_agency} · {summary.dwr_measurement_method})  
 
 ---
 
@@ -236,9 +240,9 @@ Even if this well operated at the theoretical physical ceiling of a brand-new fa
 ## IV. LEGAL & REGULATORY REBUTTAL BRIEF (CALIFORNIA EVIDENCE CODE & SGMA)
 
 ### 1. Evidentiary Superiority of CPUC Revenue-Grade Metering & Official DWR Soundings
-1. **CPUC Electric Tariff Rule 17 & ANSI C12.20 Accuracy Class (Cal. Evid. Code § 1271):** Pacific Gas & Electric (PG&E) SmartMeter interval telemetry (`Meter ID: {well.meter_id}`, `SAID: {well.service_agreement_id}`) is continuously calibrated and audited under California Public Utilities Commission (CPUC) authority to within $\\pm 0.2\\%$ to $\\pm 0.5\\%$ revenue accuracy. These 15-minute intervals constitute contemporaneous business records admissible under California Evidence Code § 1271.
-2. **Official DWR / CASGEM Groundwater Elevations (Cal. Evid. Code § 1280):** Physical depth-to-water soundings recorded in the California Department of Water Resources (DWR) Monitoring Network (`Station {summary.dwr_monitoring_site_used}`) are official public records made by public employees within the scope of duty under California Evidence Code § 1280 and 23 CCR § 354.34.
-3. **Inadmissibility of Uncalibrated Remote-Sensing Proxy Estimates to Override Physical Metering (Water Code § 10726.4 & 23 CCR § 354.18):** Remote-sensing evapotranspiration (Land IQ) does not measure groundwater pumping; it estimates total canopy consumptive vapour flux from multispectral satellite passes every 8–16 days. Canopy ET conflates (a) stored vadose-zone winter precipitation, (b) capillary fringe uptake, (c) cover crop / weed transpiration, (d) adjacent parcel advective heat transfer, and (e) surface water deliveries with groundwater extraction. Under California Water Code § 10726.4(a)(2) and constitutional due process requirements against arbitrary administrative penalties (Proposition 218 / Proposition 26), a GSA cannot levy extraction fees or tier penalties on phantom water that thermodynamic law proves was never pumped from the wellhead.
+1. **CPUC Electric Tariff Rule 17 & ANSI C12.20 Accuracy Class (Cal. Evid. Code § 1271):** Pacific Gas & Electric (PG&E) SmartMeter interval telemetry (`Meter ID: {well.meter_id}`, `SAID: {well.service_agreement_id}`) is continuously calibrated and audited under California Public Utilities Commission (CPUC) authority to within $\\pm 0.2\\%$ to $\\pm 0.5\\%$ revenue accuracy. These intervals constitute contemporaneous business records admissible under California Evidence Code § 1271.
+2. **Official DWR / GSA Representative Monitoring Network Elevations (Cal. Evid. Code §§ 1280, 1220 & 452(c)):** Physical depth-to-water measurements recorded in the California Department of Water Resources (DWR) CNRA Open Data Registry (`Station {summary.dwr_monitoring_site_used}`, co-monitored by `{summary.dwr_monitoring_agency}` via `{summary.dwr_measurement_method}`) are self-authenticating official public records made by public employees within the scope of statutory SGMA duty under California Evidence Code § 1280, subject to Judicial Notice under Evidence Code § 452(c), and constitute a binding Party Admission under Evidence Code § 1220 where co-monitored by the GSA.
+3. **Inadmissibility of Uncalibrated Remote-Sensing Proxy Estimates to Override Physical Metering (Water Code §§ 10725.2, 10726.4, 10730.2 & 23 CCR § 354.18):** Remote-sensing evapotranspiration (Land IQ) does not measure groundwater pumping; it estimates total canopy consumptive vapour flux from multispectral satellite passes every 8–16 days. Canopy ET conflates (a) stored vadose-zone winter precipitation, (b) capillary fringe uptake, (c) cover crop / weed transpiration, (d) adjacent parcel advective heat transfer, and (e) surface water deliveries with groundwater extraction. Under California Water Code § 10726.4(a)(2) and constitutional due process requirements against arbitrary administrative penalties (Proposition 218 / Proposition 26), a GSA cannot levy extraction fees or tier penalties on phantom water that thermodynamic law proves was never pumped from the wellhead.
 
 ### 2. Relief Requested
 Respondent (`{summary.client_id}`, APN `{summary.apn}`) formally petitions the **{summary.gsa_name}** Board of Directors and Technical Advisory Committee to:
@@ -438,7 +442,7 @@ Respondent (`{summary.client_id}`, APN `{summary.apn}`) formally petitions the *
       <div><span>Assessor Parcel Number (APN)</span><strong class="mono">{summary.apn}</strong></div>
       <div><span>State / GSA Well ID</span><strong class="mono">{summary.well_id}</strong></div>
       <div><span>PG&amp;E Service Agreement &amp; Meter</span><strong class="mono">SAID {well.service_agreement_id} / Meter {well.meter_id}</strong></div>
-      <div><span>DWR CASGEM Monitoring Site</span><strong class="mono">{summary.dwr_monitoring_site_used}</strong></div>
+      <div><span>Official DWR Station &amp; Agency</span><strong class="mono">{summary.dwr_monitoring_site_used} ({summary.dwr_monitoring_agency})</strong></div>
       <div><span>Certified Pump Efficiency Basis</span><strong class="mono">OPE {well.ope * 100:.1f}% · {apet_desc}</strong></div>
     </div>
 
@@ -455,7 +459,7 @@ Respondent (`{summary.client_id}`, APN `{summary.apn}`) formally petitions the *
       </div>
       <div class="kpi-box">
         <div class="label">Net Satellite Over-Estimate</div>
-        <div class="val">+{summary.net_discrepancy_af:,.2f} AF</div>
+        <div class="val">{summary.net_discrepancy_af:+,.2f} AF</div>
         <div class="sub">{summary.discrepancy_pct:+.1f}% variance over physical lift</div>
       </div>
       <div class="kpi-box">
@@ -522,13 +526,15 @@ Respondent (`{summary.client_id}`, APN `{summary.apn}`) formally petitions the *
     <div class="legal-box">
       <h3>1. CPUC Revenue-Grade Utility Metering &amp; DWR Soundings Supersede Remote-Sensing ET Proxies</h3>
       <p>
-        <strong>A. Admissibility and Presumption of Accuracy (Cal. Evid. Code §§ 640, 1271, 1280):</strong>
-        PG&amp;E 15-minute interval data is metered under CPUC Electric Tariff Rule 17 and ANSI C12.20 revenue accuracy standards (±0.2%).
-        Concurrent groundwater depth measurements from DWR CASGEM Station <span class="mono">{summary.dwr_monitoring_site_used}</span> constitute official
-        state hydrologic records under California Evidence Code § 1280.
+        <strong>A. Admissibility, Official Public Record Status &amp; Party Admission (Cal. Evid. Code §§ 640, 1220, 1271, 1280 &amp; 452(c)):</strong>
+        PG&amp;E interval data is metered under CPUC Electric Tariff Rule 17 and ANSI C12.20 revenue accuracy standards (±0.2%).
+        Concurrent groundwater depth measurements from official DWR Station <span class="mono">{summary.dwr_monitoring_site_used}</span>
+        (co-monitored by <strong>{summary.dwr_monitoring_agency}</strong> via <strong>{summary.dwr_measurement_method}</strong>)
+        constitute self-authenticating state hydrologic records under California Evidence Code § 1280, are subject to Judicial Notice under Evidence Code § 452(c),
+        and constitute an admission by a party-opponent under Evidence Code § 1220 where co-monitored by the GSA.
       </p>
       <p>
-        <strong>B. Physical Distinction Between Canopy Evapotranspiration and Wellhead Extraction (Water Code § 10726.4 &amp; 23 CCR § 354.18):</strong>
+        <strong>B. Physical Distinction Between Canopy Evapotranspiration and Wellhead Extraction (Water Code §§ 10725.2, 10726.4, 10730.2 &amp; 23 CCR § 354.18):</strong>
         Land IQ satellite models estimate surface energy flux and vegetative evapotranspiration (ET)—not subsurface groundwater extraction.
         Satellite ET cannot distinguish between groundwater pumped through a wellhead and root-zone moisture derived from winter rainfall storage,
         perched water tables, capillary rise, adjacent parcel wind advection, or surface canal seepage. Under SGMA (Water Code § 10726.4(a)(2)),

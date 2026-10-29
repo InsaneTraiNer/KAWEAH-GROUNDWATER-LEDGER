@@ -22,7 +22,7 @@ from typing import List, Optional, Sequence
 
 from anomaly_detection import ForensicAnomalyDetector
 from audit_report import AuditReportGenerator
-from hydraulics import HydraulicEngineA, HydraulicEngineB
+from hydraulics import HydraulicEngineA
 from ingestion import DWRCasgemConnector, PGEGreenButtonParser
 from schemas import DWRMonitoringRecord, WellProfile
 
@@ -39,13 +39,16 @@ def run_audit_pipeline(
     gsa_penalty_rate: float,
     output_path: Path,
     dwr_csv_file: Optional[Path] = None,
-    engine: str = "A",
+    live_dwr: bool = False,
 ) -> int:
-    """Executes the end-to-end deterministic SGMA forensic extraction audit pipeline."""
+    """Executes the end-to-end deterministic SGMA forensic extraction audit pipeline (Engine A)."""
     if not well_config_file.exists():
         raise FileNotFoundError(f"Well config JSON not found: {well_config_file}")
 
     well_raw = json.loads(well_config_file.read_text(encoding="utf-8"))
+    # Strip legacy pump_curve key if present in older well_config.json files
+    if isinstance(well_raw, dict) and "pump_curve" in well_raw:
+        well_raw = {k: v for k, v in well_raw.items() if k != "pump_curve"}
     well = WellProfile.model_validate(well_raw)
 
     metadata, raw_intervals = PGEGreenButtonParser.parse_file(pge_file)
@@ -59,30 +62,40 @@ def run_audit_pipeline(
         candidate_records=candidate_dwr,
     )
 
+    if live_dwr:
+        live_recs = DWRCasgemConnector.fetch_live_cnra_records(matched_site)
+        if live_recs:
+            dwr_records = live_recs
+
+    dwr_agency = (
+        dwr_records[0].monitoring_agency
+        if dwr_records
+        else "Department of Water Resources"
+    )
+    methods_present = sorted({r.measurement_method for r in dwr_records}) if dwr_records else []
+    dwr_method = " & ".join(methods_present) if methods_present else "Electronic pressure transducer"
+
     timestamps = [r.interval_start for r in raw_intervals]
     swl_vector = DWRCasgemConnector.interpolate_seasonal_swl_vector(
         interval_timestamps=timestamps,
         monitoring_records=dwr_records,
         fallback_swl_ft=well.static_depth_to_water_ft,
+        apply_wellhead_offset=True,
     )
 
     kwh_vector = np.array([r.kwh for r in raw_intervals], dtype=np.float64)
+    avg_duration_hours = (
+        sum(r.duration_hours for r in raw_intervals) / len(raw_intervals)
+        if raw_intervals
+        else 0.25
+    )
 
-    engine_choice = engine.strip().upper()
-    if engine_choice == "B":
-        hydraulics_res = HydraulicEngineB.evaluate_intervals(
-            kwh_vector=kwh_vector,
-            swl_ft_vector=swl_vector,
-            well=well,
-        )
-        engine_label = "ENGINE_B_SCIPY_BRENTQ_NONLINEAR"
-    else:
-        hydraulics_res = HydraulicEngineA.evaluate_intervals(
-            kwh_vector=kwh_vector,
-            swl_ft_vector=swl_vector,
-            well=well,
-        )
-        engine_label = "ENGINE_A_ALGEBRAIC"
+    hydraulics_res = HydraulicEngineA.evaluate_intervals(
+        kwh_vector=kwh_vector,
+        swl_ft_vector=swl_vector,
+        well=well,
+        interval_hours=avg_duration_hours,
+    )
 
     audit_batch = ForensicAnomalyDetector.audit_intervals(
         raw_intervals=raw_intervals,
@@ -97,7 +110,9 @@ def run_audit_pipeline(
         land_iq_billed_af=land_iq_af,
         gsa_penalty_rate_per_af=gsa_penalty_rate,
         dwr_site_code=matched_site,
-        engine_mode=engine_label,
+        dwr_monitoring_agency=dwr_agency,
+        dwr_measurement_method=dwr_method,
+        engine_mode="ENGINE_A_ALGEBRAIC_LEDGER",
     )
 
     html_out, md_out = AuditReportGenerator.write_reports(
@@ -116,9 +131,10 @@ def run_audit_pipeline(
     print(f"Client / Grower       : {summary.client_id} (APN: {summary.apn})")
     print(f"Well ID / Subbasin    : {summary.well_id} — {summary.subbasin}")
     print(f"PG&E Meter / SAID     : {well.meter_id} / {well.service_agreement_id}")
-    print(f"DWR Monitoring Site   : {summary.dwr_monitoring_site_used}")
+    print(f"DWR Monitoring Site   : {summary.dwr_monitoring_site_used} ({summary.dwr_monitoring_agency})")
+    print(f"DWR Instrumentation   : {summary.dwr_measurement_method}")
     print(f"Hydraulic Solver      : {summary.engine_mode}")
-    print(f"Intervals Audited     : {len(audit_batch.records):,} (15-minute revenue intervals)")
+    print(f"Intervals Audited     : {len(audit_batch.records):,} (revenue-grade utility intervals)")
     print(f"Total Metered Energy  : {summary.total_kwh_consumed:,.2f} kWh")
     print(f"Forensic Exclusions   : {summary.phantom_af_prevented:.3f} AF excluded "
           f"(Suction Loss: {summary.broken_suction_intervals}, "
@@ -129,7 +145,7 @@ def run_audit_pipeline(
           f"[Bracket: {summary.uncertainty_bracket_total.af_min:,.2f} – "
           f"{summary.uncertainty_bracket_total.af_max:,.2f} AF]")
     print(f"Land IQ Satellite ET  : {summary.land_iq_billed_af:,.2f} AF")
-    print(f"Net Over-Estimation   : +{summary.net_discrepancy_af:,.2f} AF ({summary.discrepancy_pct:+.1f}%)")
+    print(f"Net Over-Estimation   : {summary.net_discrepancy_af:+,.2f} AF ({summary.discrepancy_pct:+.1f}%)")
     print(f"Contested GSA Penalty : ${summary.dollar_variance:,.2f} (@ ${summary.gsa_penalty_rate_per_af:,.2f}/AF)")
     print("-" * 78)
     print(f"HTML Rebuttal Packet  : {html_out}")
@@ -142,7 +158,7 @@ def run_audit_pipeline(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="cli_runner.py",
-        description="SGMA Extraction Auditor & Water Ledger Engine CLI",
+        description="SGMA Extraction Auditor & Water Ledger Engine CLI (Engine A Standard Evidentiary Ledger)",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -185,14 +201,12 @@ def build_parser() -> argparse.ArgumentParser:
         required=False,
         default=None,
         type=Path,
-        help="Optional local DWR CASGEM groundwater level CSV file",
+        help="Optional local DWR CASGEM / CNRA groundwater level CSV file",
     )
     audit_cmd.add_argument(
-        "--engine",
-        required=False,
-        default="A",
-        choices=["A", "B", "a", "b"],
-        help="Hydraulic calculation engine: 'A' (Algebraic Ledger) or 'B' (SciPy Brentq Non-Linear)",
+        "--live-dwr",
+        action="store_true",
+        help="Query live California Natural Resources Agency (data.cnra.ca.gov) API for the matched DWR station",
     )
     return parser
 
@@ -209,7 +223,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             gsa_penalty_rate=args.gsa_penalty_rate,
             output_path=args.output,
             dwr_csv_file=args.dwr_csv,
-            engine=args.engine,
+            live_dwr=args.live_dwr,
         )
     return 1
 
